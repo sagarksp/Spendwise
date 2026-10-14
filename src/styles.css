@@ -144,6 +144,16 @@ input,select { border-color:#e4e5f0; border-radius:13px; }
 .daily-breakdown { max-height:300px; overflow-y:auto; margin-top:12px; border-top:1px solid var(--line); }
 .daily-breakdown>div { display:flex; justify-content:space-between; gap:10px; padding:7px 2px; border-bottom:1px solid var(--line); font-size:.76rem; }
 .daily-breakdown span { color:var(--ink-muted); }
+.report-page,.report-grid,.report-card { min-width:0; }
+.report-controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:14px 0 18px; }
+.report-controls .period-switch { margin:0; }
+.report-budget-note { color:var(--ink-muted); font-size:.82rem; line-height:1.45; }
+.month-picker { display:flex; align-items:center; gap:8px; color:var(--ink-muted); font-size:.78rem; font-weight:700; }
+.month-picker input { width:165px; min-height:42px; padding:0 10px; }
+.pdf-button { min-height:42px; }
+.daily-report-card { overflow:hidden; }
+.daily-scroll { max-width:100%; }
+.daily-breakdown b { white-space:nowrap; }
 @media (max-width:650px) { .feature-card { padding:18px; }.feature-row { grid-template-columns:1fr auto; }.feature-row input { grid-column:auto; }.feature-form { display:grid; grid-template-columns:1fr 1fr; }.feature-form>input:first-child { grid-column:span 2; }.feature-form>input:not(:first-child),.feature-form>label { min-width:0; }.feature-form>button { grid-column:span 2; } }
 button:focus-visible { outline:3px solid #8486f5; outline-offset:3px; }
 @media (max-width:570px) {
@@ -157,6 +167,20 @@ button:focus-visible { outline:3px solid #8486f5; outline-offset:3px; }
   .home-budget { padding:18px; }
   .home-category-grid { grid-template-columns:1fr; }
   .home-week-summary .text-button { margin-left:0; }
+  .report-controls { align-items:stretch; }
+  .page-title { min-width:0; }
+  .report-controls .period-switch { flex:1 1 100%; }
+  .report-controls .period-switch button { flex:1; }
+  .month-picker { flex:1 1 100%; justify-content:space-between; }
+  .month-picker input { width:58%; }
+  .pdf-button { width:100%; }
+  .report-card { padding:17px; }
+  .category-bars>div { grid-template-columns:minmax(0,1fr) minmax(50px,.8fr) auto; }
+  .monthly-bars { min-width:560px; }
+  .daily-report-card h2 { margin-bottom:12px; }
+  .report-grid { gap:12px; }
+  .split-labels { min-width:0; }
+  .split-labels span { grid-template-columns:8px minmax(0,1fr) auto; }
   .bottom-nav { width:calc(100% - 18px); gap:1px; bottom:8px; }
   .bottom-nav button { min-width:0; min-height:51px; padding:6px 3px; font-size:.65rem; }
   .bottom-nav button:nth-child(4) { display:grid; }

@@ -13,6 +13,7 @@ import {
   limitStatus,
   makeId,
   money,
+  monthlyBudgetExpenses,
   monthlyCycleRange,
   nextSyncRecord,
   now,
@@ -23,6 +24,7 @@ import {
   toDateInput
 } from './domain';
 import { localStore } from './storage';
+import { monthlyReportPdf } from './reportPdf';
 import type { AuthUser, Category, Expense, FixedExpense, NeedWant, Period, QuickAdd, Screen, Settings, SpendingLimit } from './types';
 
 declare global {
@@ -191,8 +193,7 @@ function App() {
   const currentLimit = limitStatus(weekTotal, weekLimit);
   const monthRange = monthlyCycleRange(new Date(), settings.monthStartDay, settings.monthEndDay);
   const monthRecords = expensesInRange(visibleExpenses, monthRange.start, monthRange.end);
-  const monthlyBudgetExpenses = monthRecords.filter((expense) => !expense.fixedExpenseId || fixedExpenses.some((fixed) => fixed.id === expense.fixedExpenseId && fixed.includeInMonthlyBudget));
-  const monthTotal = sumExpenses(monthlyBudgetExpenses);
+  const monthTotal = sumExpenses(monthlyBudgetExpenses(monthRecords, fixedExpenses));
   const monthLimit = activeLimit(limits, 'month');
   const monthStatus = limitStatus(monthTotal, monthLimit);
   const monthCategories = userCategories.map((category) => {
@@ -502,7 +503,7 @@ function Limits({ limits, expenses, settings, categories: available, fixedExpens
   const current = (period: Period) => {
     const range = period === 'month' ? monthlyCycleRange(new Date(), settings.monthStartDay, settings.monthEndDay) : dateRange(period, new Date(), settings.weekStart);
     const ranged = expensesInRange(expenses, range.start, range.end);
-    return sumExpenses(period === 'month' ? ranged.filter((expense) => !expense.fixedExpenseId || fixedExpenses.some((fixed) => fixed.id === expense.fixedExpenseId && fixed.includeInMonthlyBudget)) : ranged);
+    return sumExpenses(period === 'month' ? monthlyBudgetExpenses(ranged, fixedExpenses) : ranged);
   };
   const activeFixed = fixedExpenses.filter((record) => record.isActive && !record.deleted);
   const monthlyLimit = activeLimit(limits, 'month');
@@ -519,7 +520,11 @@ function Limits({ limits, expenses, settings, categories: available, fixedExpens
 
 function Report({ expenses, limits, settings, categories: available = categories, fixedExpenses = [] }: { expenses: Expense[]; limits: SpendingLimit[]; settings: Settings; categories?: Category[]; fixedExpenses?: FixedExpense[] }) {
   const [period, setPeriod] = useState<'week' | 'month'>('month');
-  const anchor = new Date();
+  const [selectedMonth, setSelectedMonth] = useState(today().slice(0, 7));
+  const [year, month] = selectedMonth.split('-').map(Number);
+  const monthStart = new Date(year, month - 1, 1, 12);
+  const cycleAnchor = new Date(year, month - 1, Math.min(settings.monthStartDay, new Date(year, month, 0).getDate()), 12);
+  const anchor = period === 'week' ? new Date() : cycleAnchor;
   const range = period === 'week' ? dateRange('week', anchor, settings.weekStart) : monthlyCycleRange(anchor, settings.monthStartDay, settings.monthEndDay);
   const records = expensesInRange(expenses, range.start, range.end);
   const total = sumExpenses(records);
@@ -536,11 +541,33 @@ function Report({ expenses, limits, settings, categories: available = categories
   const days = (period === 'week' ? datesForWeek(anchor, settings.weekStart) : datesInRange(range.start, range.end)).map((date) => ({ date, total: sumExpenses(records.filter((expense) => expense.spentOn === date)) }));
   const dayMaximum = Math.max(...days.map((day) => day.total), 1);
   const limit = activeLimit(limits, period);
-  const budgetRecords = records.filter((expense) => !expense.fixedExpenseId || fixedExpenses.some((fixed) => fixed.id === expense.fixedExpenseId && fixed.includeInMonthlyBudget));
+  const budgetRecords = monthlyBudgetExpenses(records, fixedExpenses);
   const budgetSpent = period === 'month' ? sumExpenses(budgetRecords) : total;
+  const includedFixedTotal = period === 'month' ? sumExpenses(records.filter((expense) => expense.fixedExpenseId && fixedExpenses.some((fixed) => fixed.id === expense.fixedExpenseId && fixed.includeInMonthlyBudget))) : 0;
   const status = limitStatus(budgetSpent, limit);
-  const monthLabel = period === 'month' ? 'this monthly cycle' : 'this week';
-  return <section><div className="page-title"><p className="eyebrow">Spending insights</p><h1>Reports</h1><div className="period-switch"><button className={period === 'week' ? 'selected' : ''} onClick={() => setPeriod('week')}>Weekly</button><button className={period === 'month' ? 'selected' : ''} onClick={() => setPeriod('month')}>Monthly</button></div><p className="eyebrow">{range.start} · {range.end}</p><p className="report-total">{money(total)}</p><p className={difference > 0 ? 'up' : 'down'}>{previous ? `${difference >= 0 ? '+' : ''}${money(difference)} compared with the previous ${period === 'week' ? 'week' : 'cycle'}` : 'Your spending pattern is taking shape.'}</p></div><div className="report-grid"><article className="card report-card"><p className="eyebrow">Where it went</p><h2>By category</h2><div className="category-bars">{categoryTotals.length ? categoryTotals.map((category) => <div key={category.id}><span>{category.icon} {category.name}</span><div><i style={{ width: `${(category.total / maximum) * 100}%` }} /></div><b>{money(category.total)}</b></div>) : <p className="hint">Add a few expenses to see a pattern.</p>}</div><p className="hint">Fixed expenses: <strong>{money(fixedTotal)}</strong></p></article><article className="card report-card daily-report-card"><p className="eyebrow">Daily track</p><h2>Spending each day</h2><div className="daily-scroll"><div className={`daily-bars ${period === 'month' ? 'monthly-bars' : ''}`}>{days.map((day) => <div key={day.date}><b style={{ height: `${Math.max((day.total / dayMaximum) * 100, day.total ? 8 : 2)}%` }} title={`${day.date}: ${money(day.total)}`} /><span>{period === 'week' ? new Intl.DateTimeFormat('en-IN', { weekday: 'narrow' }).format(new Date(`${day.date}T12:00:00`)) : Number(day.date.slice(-2))}</span></div>)}</div></div>{period === 'month' && <div className="daily-breakdown">{days.map((day) => <div key={day.date}><span>{new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', weekday: 'short' }).format(new Date(`${day.date}T12:00:00`))}</span><b>{money(day.total)}</b></div>)}</div>}</article><article className="card report-card split-card"><p className="eyebrow">Need and want</p><h2>Choice, not guilt</h2><div className="split-ring" style={{ background: `conic-gradient(var(--need) 0 ${(need / Math.max(total, 1)) * 100}%, var(--want) ${(need / Math.max(total, 1)) * 100}% 100%)` }}><span>{total ? Math.round((want / total) * 100) : 0}%<small>wants</small></span></div><div className="split-labels"><span><i className="need-dot" />Needs <b>{money(need)}</b></span><span><i className="want-dot" />Wants <b>{money(want)}</b></span></div></article><article className="card report-card"><p className="eyebrow">{period === 'week' ? 'Weekly limit' : 'Monthly budget'}</p><h2>{limit ? status.label : `No ${period} limit`}</h2><p>{limit ? `${money(budgetSpent)} of ${money(limit.amountPaise)}` : `${money(total)} total expenses`}</p><p>Fixed expenses: {money(fixedTotal)}</p><div className="progress-track"><span className={`progress-fill ${status.tone}`} style={{ width: `${Math.min(status.percent, 100)}%` }} /></div></article></div></section>;
+  const categoryLimits = limits.filter((item) => Boolean(item.categoryId));
+  const downloadMonthlyPdf = () => {
+    const blob = monthlyReportPdf({
+      cycleLabel: new Intl.DateTimeFormat('en-IN', { month: 'long', year: 'numeric' }).format(monthStart),
+      start: range.start,
+      end: range.end,
+      expenses: records,
+      categories: available,
+      fixedExpenses,
+      monthlyBudget: activeLimit(limits, 'month'),
+      categoryLimits,
+      dailyTotals: days.map((day) => ({ date: day.date, amountPaise: day.total }))
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Spendwise-${selectedMonth}-report.pdf`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  return <section className="report-page"><div className="page-title"><p className="eyebrow">Spending insights</p><h1>Reports</h1><div className="report-controls"><div className="period-switch"><button className={period === 'week' ? 'selected' : ''} onClick={() => setPeriod('week')}>Weekly</button><button className={period === 'month' ? 'selected' : ''} onClick={() => setPeriod('month')}>Monthly</button></div>{period === 'month' && <label className="month-picker">Report month<input type="month" value={selectedMonth} onChange={(event) => { if (/^\d{4}-\d{2}$/.test(event.target.value)) setSelectedMonth(event.target.value); }} /></label>}{period === 'month' && <button className="primary-button pdf-button" onClick={downloadMonthlyPdf}>Download monthly PDF</button>}</div><p className="eyebrow">{range.start} · {range.end}</p><p className="report-total">{money(total)}</p><p className={difference > 0 ? 'up' : 'down'}>{previous ? `${difference >= 0 ? '+' : ''}${money(difference)} compared with the previous ${period === 'week' ? 'week' : 'cycle'}` : 'Your spending pattern is taking shape.'}</p>{period === 'month' && <p className="report-budget-note">{money(budgetSpent)} counts toward your monthly limit{includedFixedTotal ? `, including ${money(includedFixedTotal)} in included fixed expenses` : ''}.</p>}</div><div className="report-grid"><article className="card report-card"><p className="eyebrow">Where it went</p><h2>By category</h2><div className="category-bars">{categoryTotals.length ? categoryTotals.map((category) => <div key={category.id}><span>{category.icon} {category.name}</span><div><i style={{ width: `${(category.total / maximum) * 100}%` }} /></div><b>{money(category.total)}</b></div>) : <p className="hint">Add a few expenses to see a pattern.</p>}</div><p className="hint">Fixed expenses: <strong>{money(fixedTotal)}</strong></p></article><article className="card report-card daily-report-card"><p className="eyebrow">Daily track</p><h2>Spending each day</h2><div className="daily-scroll"><div className={`daily-bars ${period === 'month' ? 'monthly-bars' : ''}`}>{days.map((day) => <div key={day.date}><b style={{ height: `${Math.max((day.total / dayMaximum) * 100, day.total ? 8 : 2)}%` }} title={`${day.date}: ${money(day.total)}`} /><span>{period === 'week' ? new Intl.DateTimeFormat('en-IN', { weekday: 'narrow' }).format(new Date(`${day.date}T12:00:00`)) : Number(day.date.slice(-2))}</span></div>)}</div></div>{period === 'month' && <div className="daily-breakdown">{days.map((day) => <div key={day.date}><span>{new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', weekday: 'short' }).format(new Date(`${day.date}T12:00:00`))}</span><b>{money(day.total)}</b></div>)}</div>}</article><article className="card report-card split-card"><p className="eyebrow">Need and want</p><h2>Choice, not guilt</h2><div className="split-ring" style={{ background: `conic-gradient(var(--need) 0 ${(need / Math.max(total, 1)) * 100}%, var(--want) ${(need / Math.max(total, 1)) * 100}% 100%)` }}><span>{total ? Math.round((want / total) * 100) : 0}%<small>wants</small></span></div><div className="split-labels"><span><i className="need-dot" />Needs <b>{money(need)}</b></span><span><i className="want-dot" />Wants <b>{money(want)}</b></span></div></article><article className="card report-card"><p className="eyebrow">{period === 'week' ? 'Weekly limit' : 'Monthly budget'}</p><h2>{limit ? status.label : `No ${period} limit`}</h2><p>{limit ? `${money(budgetSpent)} of ${money(limit.amountPaise)}` : `${money(total)} total expenses`}</p><p>Fixed expenses: {money(fixedTotal)}</p><div className="progress-track"><span className={`progress-fill ${status.tone}`} style={{ width: `${Math.min(status.percent, 100)}%` }} /></div></article></div></section>;
 }
 
 export default App;

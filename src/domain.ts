@@ -81,6 +81,11 @@ export function sumExpenses(expenses: Expense[]): number {
   return expenses.filter((expense) => !expense.deleted).reduce((total, expense) => total + expense.amountPaise, 0);
 }
 
+export function monthlyBudgetExpenses(expenses: Expense[], fixedExpenses: Array<{ id: string; includeInMonthlyBudget?: boolean }>): Expense[] {
+  const includedFixedIds = new Set(fixedExpenses.filter((fixed) => fixed.includeInMonthlyBudget).map((fixed) => fixed.id));
+  return expenses.filter((expense) => !expense.fixedExpenseId || includedFixedIds.has(expense.fixedExpenseId));
+}
+
 export function expensesInRange(expenses: Expense[], start: string, end: string): Expense[] {
   return expenses.filter((expense) => !expense.deleted && expense.spentOn >= start && expense.spentOn <= end);
 }
