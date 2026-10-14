@@ -13,7 +13,8 @@ interface MonthlyPdfInput {
   dailyTotals: Array<{ date: string; amountPaise: number }>;
 }
 
-type Line = { text: string; size?: number; color?: string; bold?: boolean; gap?: number; kind?: 'section' | 'category'; value?: string; detail?: string; ratio?: number };
+type PdfTable = 'daily' | 'expenses';
+type Line = { text?: string; size?: number; color?: string; bold?: boolean; gap?: number; kind?: 'section' | 'category' | 'tableHeader' | 'tableRow'; value?: string; detail?: string; ratio?: number; table?: PdfTable; cells?: string[]; stripe?: boolean; label?: string };
 
 const ascii = (value: string) => value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[₹]/g, 'INR ').replace(/[^\x20-\x7e]/g, '?');
 const escapePdf = (value: string) => ascii(value).replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)');
@@ -25,11 +26,34 @@ function wrap(value: string, max = 86): string[] {
   let line = '';
   for (const word of words) {
     if (!word) continue;
-    if (line && `${line} ${word}`.length > max) { lines.push(line); line = word; }
-    else line = line ? `${line} ${word}` : word;
+    const chunks = word.match(new RegExp(`.{1,${max}}`, 'g')) ?? [word];
+    for (const chunk of chunks) {
+      if (line && `${line} ${chunk}`.length > max) { lines.push(line); line = chunk; }
+      else line = line ? `${line} ${chunk}` : chunk;
+    }
   }
   if (line) lines.push(line);
   return lines.length ? lines : [''];
+}
+
+const tableColumns: Record<PdfTable, Array<{ title: string; x: number; max: number }>> = {
+  daily: [
+    { title: 'Date', x: 56, max: 18 },
+    { title: 'Day', x: 206, max: 20 },
+    { title: 'Spent', x: 453, max: 18 }
+  ],
+  expenses: [
+    { title: 'Date', x: 56, max: 14 },
+    { title: 'Expense', x: 128, max: 34 },
+    { title: 'Category', x: 333, max: 18 },
+    { title: 'Amount', x: 451, max: 18 }
+  ]
+};
+
+function tableRowHeight(line: Line): number {
+  const columns = tableColumns[line.table ?? 'expenses'];
+  const rowLines = Math.max(...columns.map((column, index) => wrap(line.cells?.[index] ?? '', column.max).length));
+  return Math.max(line.table === 'daily' ? 23 : 24, rowLines * 10 + 12);
 }
 
 function streamForPage(lines: Line[], pageNumber: number, pageCount: number, firstPage: boolean, cycleLabel: string, highlights: string[]): string {
@@ -59,13 +83,13 @@ function streamForPage(lines: Line[], pageNumber: number, pageCount: number, fir
     if (line.kind === 'section') {
       commands.push(`0.95 0.93 1 rg 43 ${y - 7} 509 25 re f`);
       commands.push(`0.96 0.53 0.38 rg 51 ${y + 1} 6 6 re f`);
-      commands.push(`BT /F2 10 Tf 0.32 0.28 0.68 rg 65 ${y} Td (${escapePdf(line.text)}) Tj ET`);
+      commands.push(`BT /F2 10 Tf 0.32 0.28 0.68 rg 65 ${y} Td (${escapePdf(line.text ?? '')}) Tj ET`);
       y -= 33;
       continue;
     }
     if (line.kind === 'category') {
       commands.push(`0.97 0.98 1 rg 48 ${y - 34} 500 42 re f`);
-      commands.push(`BT /F2 9 Tf 0.20 0.24 0.40 rg 56 ${y} Td (${escapePdf(line.text)}) Tj ET`);
+      commands.push(`BT /F2 9 Tf 0.20 0.24 0.40 rg 56 ${y} Td (${escapePdf(line.text ?? '')}) Tj ET`);
       commands.push(`BT /F2 9 Tf 0.20 0.24 0.40 rg 434 ${y} Td (${escapePdf(line.value ?? '')}) Tj ET`);
       if (line.detail) commands.push(`BT /F1 7 Tf 0.43 0.45 0.57 rg 56 ${y - 10} Td (${escapePdf(line.detail)}) Tj ET`);
       commands.push(`0.88 0.88 0.96 rg 56 ${y - 24} 340 5 re f`);
@@ -73,7 +97,32 @@ function streamForPage(lines: Line[], pageNumber: number, pageCount: number, fir
       y -= 43;
       continue;
     }
-    const wrapped = wrap(line.text, size >= 15 ? 65 : 88);
+    if (line.kind === 'tableHeader') {
+      const table = line.table ?? 'expenses';
+      commands.push(`0.38 0.32 0.82 rg 43 ${y - 20} 509 34 re f`);
+      commands.push(`BT /F1 7 Tf 0.88 0.86 1 rg 51 ${y + 3} Td (${escapePdf(line.label ?? '')}) Tj ET`);
+      tableColumns[table].forEach((column, index) => {
+        commands.push(`BT /F2 8 Tf 1 1 1 rg ${column.x} ${y - 11} Td (${escapePdf(line.cells?.[index] ?? column.title)}) Tj ET`);
+      });
+      y -= 38;
+      continue;
+    }
+    if (line.kind === 'tableRow') {
+      const table = line.table ?? 'expenses';
+      const rowHeight = tableRowHeight(line);
+      if (line.stripe) commands.push(`0.96 0.97 1 rg 43 ${y - rowHeight + 5} 509 ${rowHeight} re f`);
+      tableColumns[table].forEach((column, index) => {
+        const wrapped = wrap(line.cells?.[index] ?? '', column.max);
+        wrapped.forEach((cellLine, lineIndex) => {
+          const baseline = y - 4 - lineIndex * 10;
+          commands.push(`BT /F1 8 Tf 0.20 0.24 0.40 rg ${column.x} ${baseline} Td (${escapePdf(cellLine)}) Tj ET`);
+        });
+      });
+      commands.push(`0.88 0.89 0.94 rg 43 ${y - rowHeight + 5} 509 0.6 re f`);
+      y -= rowHeight;
+      continue;
+    }
+    const wrapped = wrap(line.text ?? '', size >= 15 ? 65 : 88);
     for (const text of wrapped) {
       if (y < 52) break;
       commands.push(`BT /${boldFont} ${size} Tf ${color} rg 48 ${y} Td (${escapePdf(text)}) Tj ET`);
@@ -112,24 +161,43 @@ export function monthlyReportPdf(input: MonthlyPdfInput): Blob {
     ...categories.map(({ name, amount: spent, limit }) => ({ kind: 'category' as const, text: name, value: amount(spent), detail: limit ? `Monthly allocation ${amount(limit.amountPaise)}` : undefined, ratio: spent / largestCategory })),
     { text: `Fixed expenses: ${amount(fixedExpensesInReport.reduce((sum, expense) => sum + expense.amountPaise, 0))} across ${fixedExpensesInReport.length} included entries.`, color: '0.30 0.32 0.44', gap: 8 },
     { text: 'DAY BY DAY', kind: 'section' },
-    ...input.dailyTotals.map((day) => ({ text: `${day.date}    ${amount(day.amountPaise)}` })),
+    { kind: 'tableHeader', table: 'daily', label: 'DAILY TOTALS', cells: ['Date', 'Day', 'Spent'] },
+    ...input.dailyTotals.map((day, index) => {
+      const date = new Date(`${day.date}T12:00:00`);
+      return { kind: 'tableRow' as const, table: 'daily' as const, cells: [new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short' }).format(date), new Intl.DateTimeFormat('en-IN', { weekday: 'long' }).format(date), amount(day.amountPaise)], stripe: index % 2 === 1 };
+    }),
     { text: 'EXPENSE DETAILS', kind: 'section' },
-    ...input.expenses.slice().sort((a, b) => a.spentOn.localeCompare(b.spentOn)).map((expense) => {
+    { kind: 'tableHeader', table: 'expenses', label: 'EXPENSE ITEMS', cells: ['Date', 'Expense', 'Category', 'Amount'] },
+    ...input.expenses.slice().sort((a, b) => a.spentOn.localeCompare(b.spentOn) || a.itemName.localeCompare(b.itemName)).map((expense, index) => {
       const categoryName = expense.fixedExpenseId ? 'Fixed expense' : input.categories.find((category) => category.id === expense.categoryId)?.name ?? 'Other';
-      return { text: `${expense.spentOn} | ${expense.itemName} | ${categoryName} | ${amount(expense.amountPaise)}` };
+      return { kind: 'tableRow' as const, table: 'expenses' as const, cells: [new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short' }).format(new Date(`${expense.spentOn}T12:00:00`)), expense.itemName, categoryName, amount(expense.amountPaise)], stripe: index % 2 === 1 };
     })
   ];
 
   const pages: Line[][] = [];
   let current: Line[] = [];
   let estimatedLines = 0;
+  let activeTableHeader: Line | undefined;
   for (const line of lines) {
-    const lineHeight = line.kind === 'section' ? 33 : line.kind === 'category' ? 43 : wrap(line.text, line.size && line.size >= 15 ? 65 : 88).length * (line.size && line.size >= 12 ? 19 : 15) + (line.gap ?? 0);
+    if (line.kind === 'tableHeader') activeTableHeader = line;
+    const lineHeight = line.kind === 'section' ? 33
+      : line.kind === 'category' ? 43
+        : line.kind === 'tableHeader' ? 38
+          : line.kind === 'tableRow' ? tableRowHeight(line)
+            : wrap(line.text ?? '', line.size && line.size >= 15 ? 65 : 88).length * (line.size && line.size >= 12 ? 19 : 15) + (line.gap ?? 0);
     const capacity = pages.length === 0 ? 568 : 650;
-    if (estimatedLines + lineHeight > capacity) {
+    const currentHasTableHeader = line.kind === 'tableRow' && current.some((item) => item.kind === 'tableHeader' && item.table === line.table);
+    const repeatedHeaderHeight = line.kind === 'tableRow' && activeTableHeader && !currentHasTableHeader ? 38 : 0;
+    const startsExpenseDetails = line.kind === 'section' && line.text === 'EXPENSE DETAILS';
+    const keepExpenseTableTogether = startsExpenseDetails && current.length && capacity - estimatedLines < lineHeight + 38 + 24;
+    if (current.length && (keepExpenseTableTogether || estimatedLines + lineHeight + repeatedHeaderHeight > capacity)) {
       pages.push(current);
       current = [];
       estimatedLines = 0;
+      if (line.kind === 'tableRow' && activeTableHeader) {
+        current.push(activeTableHeader);
+        estimatedLines += 38;
+      }
     }
     current.push(line);
     estimatedLines += lineHeight;
