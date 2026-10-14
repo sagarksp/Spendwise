@@ -28,6 +28,19 @@ This file tracks implemented changes and the next work that has been identified.
 - Previously the time and enabled flag were only stored; there was no notification scheduling code.
 - A PWA page timer cannot reliably fire after the app is closed or suspended. Closed-app reminders need server push or native Android alarm scheduling.
 
+## 2026-10-14 - Android installability assets
+
+### Implemented
+
+- Added 192px and 512px PNG install icons and declared them in the web app manifest, including a maskable icon for Android.
+- Switched the Apple home-screen icon to the PNG asset.
+- Added a test-notification action so notification permission and Android delivery can be checked immediately from Settings.
+- Added the PNG icons to the offline shell cache and bumped the service-worker cache version.
+
+### Finding
+
+- The manifest previously declared only a scalable SVG icon. Chromium install criteria require raster icons at 192px and 512px; without them the browser may not offer a full app install.
+
 ## 2026-10-14 — Android install path and repository review
 
 ### Implemented

@@ -78,6 +78,7 @@ function App() {
   const [chips, setChips] = useState<QuickAdd[]>([]);
   const [limits, setLimits] = useState<SpendingLimit[]>([]);
   const [settings, setSettings] = useState<Settings>({ weekStart: 1, language: 'en', reminderEnabled: false, reminderTime: '21:00' });
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() => ('Notification' in window ? Notification.permission : 'denied'));
   const [draft, setDraft] = useState<ExpenseDraft>(blankDraft);
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -110,7 +111,7 @@ function App() {
   }, [toast]);
 
   useEffect(() => {
-    if (!ready || !settings.reminderEnabled || !('Notification' in window) || Notification.permission !== 'granted' || !('serviceWorker' in navigator)) return;
+    if (!ready || !settings.reminderEnabled || notificationPermission !== 'granted' || !('serviceWorker' in navigator)) return;
 
     let timer = 0;
     let disposed = false;
@@ -141,7 +142,7 @@ function App() {
     scheduleNext();
 
     return () => { disposed = true; window.clearTimeout(timer); };
-  }, [ready, settings.reminderEnabled, settings.reminderTime]);
+  }, [ready, settings.reminderEnabled, settings.reminderTime, notificationPermission]);
 
   const visibleExpenses = useMemo(() => expenses.filter((expense) => !expense.deleted), [expenses]);
   const todayExpenses = useMemo(() => visibleExpenses.filter((expense) => expense.spentOn === today()), [visibleExpenses]);
@@ -270,6 +271,7 @@ function App() {
     }
     try {
       const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
       if (permission !== 'granted') {
         setToast(permission === 'denied' ? 'Notifications are blocked. Allow them for Spendwise in your browser settings.' : 'Allow notifications to turn on your daily reminder.');
         return;
@@ -280,6 +282,33 @@ function App() {
       setToast(`Daily reminder enabled for ${settings.reminderTime}. Keep Spendwise open to receive it.`);
     } catch {
       setToast('Could not enable notifications. Check the browser notification permission and try again.');
+    }
+  };
+
+  const testReminder = async () => {
+    if (!('Notification' in window) || !('serviceWorker' in navigator)) {
+      setToast('Notifications are not supported in this browser. Open Spendwise in Chrome on Android.');
+      return;
+    }
+    try {
+      const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission;
+      setNotificationPermission(permission);
+      if (permission !== 'granted') {
+        setToast('Notifications are blocked. Allow them for Spendwise in Android or browser settings.');
+        return;
+      }
+      await navigator.serviceWorker.register('/sw.js');
+      const registration = await navigator.serviceWorker.ready;
+      await registration.showNotification('Spendwise notification test', {
+        body: 'Notifications are reaching this device.',
+        icon: '/icons/spendwise-192.png',
+        badge: '/icons/spendwise-192.png',
+        tag: 'spendwise-reminder-test',
+        data: { url: '/' }
+      });
+      setToast('Test notification sent.');
+    } catch {
+      setToast('Could not send a test notification. Check Android notification settings for Spendwise.');
     }
   };
 
@@ -371,7 +400,7 @@ function App() {
       {screen === 'limits' && <Limits limits={limits} expenses={visibleExpenses} settings={settings} onSave={saveLimit} />}
 
       {screen === 'settings' && <section><div className="page-title"><p className="eyebrow">Control your data</p><h1>Settings</h1></div><div className="settings-grid"><section className="card settings-card"><p className="eyebrow">Cloud backup</p><h2>{user ? `Backed up as ${user.displayName}` : 'Keep a private backup'}</h2><p>{user ? 'Your Google account is only used to identify your private backup. We never read email or contacts.' : 'Your expenses remain on this device until you choose Google sign-in and Back up.'}</p>{user ? <div className="account-row">{user.picture ? <img src={user.picture} alt="" referrerPolicy="no-referrer" /> : <span className="avatar">{user.displayName.slice(0, 1)}</span>}<div><b>{user.displayName}</b><span>{user.email}</span></div><button className="text-button" onClick={async () => { await signOut(); setUser(null); setToast('Signed out. Your local data remains on this device.'); }}>Sign out</button></div> : <GoogleButton onSuccess={handleGoogle} onError={setToast} />}{user && <button className="primary-button full-button" onClick={backupAndSync} disabled={syncing}>{syncing ? 'Syncing…' : pendingCount ? `Back up ${pendingCount} change${pendingCount === 1 ? '' : 's'}` : 'Sync now'}</button>}</section>
-        <section className="card settings-card"><p className="eyebrow">Preferences</p><h2>Make it yours</h2><label className="settings-label">Week starts on<select value={settings.weekStart} onChange={(event) => saveSettings({ ...settings, weekStart: Number(event.target.value) as 0 | 1 })}><option value={1}>Monday</option><option value={0}>Sunday</option></select></label><label className="settings-label">Language<select value={settings.language} onChange={(event) => saveSettings({ ...settings, language: event.target.value as 'en' | 'hi' })}><option value="en">English</option><option value="hi">Hindi</option></select></label><label className="reminder-row"><input type="checkbox" checked={settings.reminderEnabled} onChange={(event) => toggleReminder(event.target.checked)} /><span><b>Daily reminder</b><small>At {settings.reminderTime}; keep Spendwise open to receive it</small></span><input type="time" value={settings.reminderTime} onChange={(event) => saveSettings({ ...settings, reminderTime: event.target.value })} /></label></section>
+        <section className="card settings-card"><p className="eyebrow">Preferences</p><h2>Make it yours</h2><label className="settings-label">Week starts on<select value={settings.weekStart} onChange={(event) => saveSettings({ ...settings, weekStart: Number(event.target.value) as 0 | 1 })}><option value={1}>Monday</option><option value={0}>Sunday</option></select></label><label className="settings-label">Language<select value={settings.language} onChange={(event) => saveSettings({ ...settings, language: event.target.value as 'en' | 'hi' })}><option value="en">English</option><option value="hi">Hindi</option></select></label><label className="reminder-row"><input type="checkbox" checked={settings.reminderEnabled} onChange={(event) => toggleReminder(event.target.checked)} /><span><b>Daily reminder</b><small>At {settings.reminderTime}; keep Spendwise open to receive it</small></span><input type="time" value={settings.reminderTime} onChange={(event) => saveSettings({ ...settings, reminderTime: event.target.value })} /></label>{settings.reminderEnabled && <button className="text-button reminder-test" type="button" onClick={testReminder}>Send test notification</button>}</section>
         <section className="card settings-card quick-manager"><p className="eyebrow">Your shortcuts</p><h2>Quick add shelf</h2><p>Create only the shortcuts that make your own day faster.</p><form className="quick-form" onSubmit={saveChip}><input placeholder="Item, e.g. Tea" value={chipDraft.itemName} onChange={(event) => setChipDraft((current) => ({ ...current, itemName: event.target.value }))} /><input inputMode="decimal" placeholder="Amount" value={chipDraft.amount} onChange={(event) => setChipDraft((current) => ({ ...current, amount: event.target.value }))} /><select value={chipDraft.categoryId} onChange={(event) => setChipDraft((current) => ({ ...current, categoryId: event.target.value, tag: chooseDefaultTag(event.target.value) }))}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select><select value={chipDraft.tag} onChange={(event) => setChipDraft((current) => ({ ...current, tag: event.target.value as NeedWant }))}><option value="need">Need</option><option value="want">Want</option></select><button className="secondary-button" type="submit">Add quick add</button></form><div className="managed-chip-list">{chips.filter((chip) => !chip.deleted).length ? chips.filter((chip) => !chip.deleted).map((chip) => <div key={chip.id}><span>{categoryById(chip.categoryId).icon}</span><b>{chip.itemName}</b><small>{money(chip.defaultAmountPaise)}</small><button aria-label={`Remove ${chip.itemName}`} onClick={() => removeChip(chip)}>×</button></div>) : <p className="hint">No quick adds yet.</p>}</div></section></div></section>}
     </main>
 

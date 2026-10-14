@@ -105,6 +105,7 @@ body { background:radial-gradient(ellipse at 8% 0%,#e6e7ff 0,transparent 27rem),
 input,select { border-color:#e4e5f0; border-radius:13px; }
 .empty-state { border-color:#c9caf1; background:#fafaff; border-radius:20px; }
 .toast { border:1px solid #ffffff20; background:#303579; box-shadow:0 12px 32px #292d7040; }
+.reminder-test { margin-top:10px; }
 button:focus-visible { outline:3px solid #8486f5; outline-offset:3px; }
 @media (max-width:570px) {
   .app-shell { padding-left:15px; padding-right:15px; }

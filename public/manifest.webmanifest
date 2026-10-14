@@ -10,6 +10,8 @@
   "background_color": "#f7f8f4",
   "theme_color": "#123c35",
   "icons": [
-    { "src": "/icons/spendwise.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    { "src": "/icons/spendwise-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/spendwise-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/spendwise-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

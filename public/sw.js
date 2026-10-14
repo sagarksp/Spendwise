@@ -1,5 +1,5 @@
-const CACHE_NAME = 'spendwise-shell-v1';
-const APP_SHELL = ['/', '/manifest.webmanifest', '/icons/spendwise.svg'];
+const CACHE_NAME = 'spendwise-shell-v2';
+const APP_SHELL = ['/', '/manifest.webmanifest', '/icons/spendwise.svg', '/icons/spendwise-192.png', '/icons/spendwise-512.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
