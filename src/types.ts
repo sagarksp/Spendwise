@@ -26,6 +26,17 @@ export interface Expense extends SyncFields {
   tag: NeedWant;
   spentOn: string;
   note?: string;
+  fixedExpenseId?: string;
+}
+
+export interface FixedExpense extends SyncFields {
+  id: string;
+  name: string;
+  amountPaise: number;
+  dayOfMonth: number;
+  createdOn: string;
+  isActive: boolean;
+  includeInMonthlyBudget?: boolean;
 }
 
 export interface QuickAdd extends SyncFields {
@@ -44,10 +55,13 @@ export interface SpendingLimit extends SyncFields {
   period: Period;
   amountPaise: number;
   isActive: boolean;
+  categoryId?: string;
 }
 
 export interface Settings {
   weekStart: 0 | 1;
+  monthStartDay: number;
+  monthEndDay: number;
   language: 'en' | 'hi';
   reminderEnabled: boolean;
   reminderTime: string;

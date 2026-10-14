@@ -1,12 +1,15 @@
-import type { Expense, QuickAdd, Settings, SpendingLimit, SyncPayload } from './types';
+import type { Category, Expense, FixedExpense, QuickAdd, Settings, SpendingLimit, SyncPayload } from './types';
+import { categories as defaultCategories } from './domain';
 
 const DB_NAME = 'spendwise-local';
-const DB_VERSION = 1;
-const stores = ['expenses', 'quickAdd', 'limits', 'settings', 'meta'] as const;
+const DB_VERSION = 2;
+const stores = ['expenses', 'quickAdd', 'limits', 'settings', 'meta', 'categories', 'fixedExpenses'] as const;
 type StoreName = (typeof stores)[number];
 
 const defaults: Settings = {
   weekStart: 1,
+  monthStartDay: 1,
+  monthEndDay: 31,
   language: 'en',
   reminderEnabled: false,
   reminderTime: '21:00'
@@ -64,11 +67,20 @@ export const localStore = {
   expenses: () => readAll<Expense>('expenses'),
   quickAdd: () => readAll<QuickAdd>('quickAdd'),
   limits: () => readAll<SpendingLimit>('limits'),
+  categories: async () => {
+    const saved = await readAll<(Category & { deleted?: boolean })>('categories');
+    const byId = new Map(saved.map((category) => [category.id, category]));
+    return [...defaultCategories.map((category) => byId.get(category.id) ?? category), ...saved.filter((category) => !defaultCategories.some((base) => base.id === category.id))];
+  },
+  fixedExpenses: () => readAll<FixedExpense>('fixedExpenses'),
   saveExpense: (expense: Expense) => put('expenses', expense),
   saveQuickAdd: (chip: QuickAdd) => put('quickAdd', chip),
   saveLimit: (limit: SpendingLimit) => put('limits', limit),
+  saveCategory: (category: Category & { deleted?: boolean }) => put('categories', category),
+  saveFixedExpense: (record: FixedExpense) => put('fixedExpenses', record),
   async settings(): Promise<Settings> {
-    return (await get<{ id: string } & Settings>('settings', 'settings')) ?? { id: 'settings', ...defaults };
+    const saved = await get<{ id: string } & Partial<Settings>>('settings', 'settings');
+    return { ...defaults, ...saved };
   },
   saveSettings: (settings: Settings) => put('settings', { id: 'settings', ...settings }),
   async cursor(): Promise<number> {

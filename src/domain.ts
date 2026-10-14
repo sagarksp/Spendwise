@@ -25,13 +25,13 @@ export function money(paise: number): string {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(paise / 100);
 }
 
-export function categoryForItem(itemName: string): Category {
+export function categoryForItem(itemName: string, available: Category[] = categories): Category {
   const normalized = itemName.trim().toLowerCase();
-  return categories.find((category) => category.keywords.some((word) => normalized.includes(word))) ?? categories.at(-1)!;
+  return available.find((category) => category.keywords.some((word) => normalized.includes(word))) ?? available.find((category) => category.id === 'other') ?? available[0] ?? categories.at(-1)!;
 }
 
-export function categoryById(id: string): Category {
-  return categories.find((category) => category.id === id) ?? categories.at(-1)!;
+export function categoryById(id: string, available: Category[] = categories): Category {
+  return available.find((category) => category.id === id) ?? available.find((category) => category.id === 'other') ?? available[0] ?? categories.at(-1)!;
 }
 
 export function dateRange(period: Period, anchor = new Date(), weekStart: 0 | 1 = 1): { start: string; end: string } {
@@ -52,6 +52,26 @@ export function dateRange(period: Period, anchor = new Date(), weekStart: 0 | 1 
   return { start: toDateInput(first), end: toDateInput(last) };
 }
 
+export function monthlyCycleRange(anchor = new Date(), startDay = 1, endDay = 31): { start: string; end: string } {
+  const startInMonth = (year: number, month: number) => new Date(year, month, Math.min(Math.max(startDay, 1), new Date(year, month + 1, 0).getDate()), 12);
+  const anchorDate = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate(), 12);
+  let start = startInMonth(anchorDate.getFullYear(), anchorDate.getMonth());
+  if (anchorDate < start) start = startInMonth(anchorDate.getFullYear(), anchorDate.getMonth() - 1);
+  const endMonthOffset = endDay < startDay ? 1 : 0;
+  const endYear = start.getFullYear();
+  const endMonth = start.getMonth() + endMonthOffset;
+  const end = new Date(endYear, endMonth, Math.min(Math.max(endDay, 1), new Date(endYear, endMonth + 1, 0).getDate()), 12);
+  return { start: toDateInput(start), end: toDateInput(end) };
+}
+
+export function datesInRange(start: string, end: string): string[] {
+  const first = new Date(`${start}T12:00:00`);
+  const last = new Date(`${end}T12:00:00`);
+  const dates: string[] = [];
+  for (const cursor = new Date(first); cursor <= last; cursor.setDate(cursor.getDate() + 1)) dates.push(toDateInput(cursor));
+  return dates;
+}
+
 export function toDateInput(date: Date): string {
   const adjusted = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return adjusted.toISOString().slice(0, 10);
@@ -66,7 +86,7 @@ export function expensesInRange(expenses: Expense[], start: string, end: string)
 }
 
 export function activeLimit(limits: SpendingLimit[], period: Period): SpendingLimit | undefined {
-  return limits.find((limit) => limit.period === period && limit.isActive && !limit.deleted);
+  return limits.find((limit) => limit.period === period && !limit.categoryId && limit.isActive && !limit.deleted);
 }
 
 export function limitStatus(spentPaise: number, limit?: SpendingLimit): { percent: number; label: string; tone: 'calm' | 'warning' | 'danger' } {

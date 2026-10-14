@@ -7,11 +7,13 @@ import {
   categoryForItem,
   chooseDefaultTag,
   dateRange,
+  datesInRange,
   datesForWeek,
   expensesInRange,
   limitStatus,
   makeId,
   money,
+  monthlyCycleRange,
   nextSyncRecord,
   now,
   paiseFromInput,
@@ -21,7 +23,7 @@ import {
   toDateInput
 } from './domain';
 import { localStore } from './storage';
-import type { AuthUser, Expense, NeedWant, Period, QuickAdd, Screen, Settings, SpendingLimit } from './types';
+import type { AuthUser, Category, Expense, FixedExpense, NeedWant, Period, QuickAdd, Screen, Settings, SpendingLimit } from './types';
 
 declare global {
   interface Window {
@@ -78,7 +80,9 @@ function App() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [chips, setChips] = useState<QuickAdd[]>([]);
   const [limits, setLimits] = useState<SpendingLimit[]>([]);
-  const [settings, setSettings] = useState<Settings>({ weekStart: 1, language: 'en', reminderEnabled: false, reminderTime: '21:00' });
+  const [userCategories, setUserCategories] = useState<Category[]>(categories);
+  const [fixedExpenses, setFixedExpenses] = useState<FixedExpense[]>([]);
+  const [settings, setSettings] = useState<Settings>({ weekStart: 1, monthStartDay: 1, monthEndDay: 31, language: 'en', reminderEnabled: false, reminderTime: '21:00' });
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() => ('Notification' in window ? Notification.permission : 'denied'));
   const [draft, setDraft] = useState<ExpenseDraft>(blankDraft);
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
@@ -91,11 +95,13 @@ function App() {
   const [chipDraft, setChipDraft] = useState({ itemName: '', amount: '', categoryId: 'other', tag: 'need' as NeedWant });
 
   const refreshLocal = async () => {
-    const [savedExpenses, savedChips, savedLimits, savedSettings] = await Promise.all([localStore.expenses(), localStore.quickAdd(), localStore.limits(), localStore.settings()]);
+    const [savedExpenses, savedChips, savedLimits, savedSettings, savedCategories, savedFixed] = await Promise.all([localStore.expenses(), localStore.quickAdd(), localStore.limits(), localStore.settings(), localStore.categories(), localStore.fixedExpenses()]);
     setExpenses(savedExpenses);
     setChips(savedChips);
     setLimits(savedLimits);
     setSettings(savedSettings);
+    setUserCategories(savedCategories.filter((category) => !(category as Category & { deleted?: boolean }).deleted));
+    setFixedExpenses(savedFixed);
   };
 
   useEffect(() => {
@@ -104,6 +110,34 @@ function App() {
       setReady(true);
     }).catch(() => setReady(true));
   }, []);
+
+  // Materialize due recurring expenses whenever the app opens. The stable per-date ID
+  // prevents duplicate entries if the user refreshes or opens multiple tabs.
+  useEffect(() => {
+    if (!ready || !fixedExpenses.length) return;
+    void (async () => {
+      const existing = await localStore.expenses();
+      const existingIds = new Set(existing.map((expense) => expense.id));
+      const through = today();
+      for (const fixed of fixedExpenses.filter((item) => item.isActive && !item.deleted)) {
+        const first = new Date(`${fixed.createdOn}T12:00:00`);
+        const end = new Date(`${through}T12:00:00`);
+        const cursor = new Date(first.getFullYear(), first.getMonth(), 1, 12);
+        while (cursor <= end) {
+          const lastDay = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate();
+          const day = Math.min(fixed.dayOfMonth, lastDay);
+          const spentOn = toDateInput(new Date(cursor.getFullYear(), cursor.getMonth(), day, 12));
+          const id = `fixed-${fixed.id}-${spentOn}`;
+          if (spentOn >= fixed.createdOn && spentOn <= through && !existingIds.has(id)) {
+            await localStore.saveExpense(nextSyncRecord({ id, itemName: fixed.name, amountPaise: fixed.amountPaise, categoryId: 'other', tag: 'need' as NeedWant, spentOn, fixedExpenseId: fixed.id, deleted: false }));
+            existingIds.add(id);
+          }
+          cursor.setMonth(cursor.getMonth() + 1);
+        }
+      }
+      await refreshLocal();
+    })();
+  }, [ready, fixedExpenses.map((item) => `${item.id}:${item.updatedAt}:${item.isActive}`).join('|')]);
 
   useEffect(() => {
     if (!toast) return;
@@ -155,10 +189,21 @@ function App() {
   const weekTotal = sumExpenses(weekExpenses);
   const weekLimit = activeLimit(limits, 'week');
   const currentLimit = limitStatus(weekTotal, weekLimit);
+  const monthRange = monthlyCycleRange(new Date(), settings.monthStartDay, settings.monthEndDay);
+  const monthRecords = expensesInRange(visibleExpenses, monthRange.start, monthRange.end);
+  const monthlyBudgetExpenses = monthRecords.filter((expense) => !expense.fixedExpenseId || fixedExpenses.some((fixed) => fixed.id === expense.fixedExpenseId && fixed.includeInMonthlyBudget));
+  const monthTotal = sumExpenses(monthlyBudgetExpenses);
+  const monthLimit = activeLimit(limits, 'month');
+  const monthStatus = limitStatus(monthTotal, monthLimit);
+  const monthCategories = userCategories.map((category) => {
+    const spent = sumExpenses(monthRecords.filter((expense) => !expense.fixedExpenseId && expense.categoryId === category.id));
+    const limit = limits.find((item) => item.categoryId === category.id && !item.deleted);
+    return { category, spent, limit, status: limitStatus(spent, limit) };
+  });
   const pendingCount = [...expenses, ...chips, ...limits].filter((item) => item.syncState === 'pending').length;
 
   const updateDraftFromItem = (itemName: string) => {
-    const suggested = categoryForItem(itemName);
+    const suggested = categoryForItem(itemName, userCategories);
     setDraft((current) => ({ ...current, itemName, categoryId: suggested.id, tag: suggested.defaultTag }));
   };
 
@@ -193,6 +238,7 @@ function App() {
       categoryId: draft.categoryId,
       tag: draft.tag,
       spentOn: draft.spentOn,
+      fixedExpenseId: existing?.fixedExpenseId,
       note: draft.note.trim() || undefined,
       deleted: false
     }, existing?.version ?? 0);
@@ -206,7 +252,7 @@ function App() {
 
   const startEdit = (expense: Expense) => {
     setEditingExpense(expense);
-    setDraft({ amount: String(expense.amountPaise / 100), itemName: expense.itemName, categoryId: expense.categoryId, tag: expense.tag, spentOn: expense.spentOn, note: expense.note ?? '', saveAsQuick: false });
+    setDraft({ amount: String(expense.amountPaise / 100), itemName: expense.itemName, categoryId: categoryById(expense.categoryId, userCategories).id, tag: expense.tag, spentOn: expense.spentOn, note: expense.note ?? '', saveAsQuick: false });
     setScreen('home');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -249,12 +295,40 @@ function App() {
 
   const saveLimit = async (period: Period, amount: string, enabled: boolean) => {
     const amountPaise = paiseFromInput(amount);
-    const current = limits.find((limit) => limit.period === period);
+    const current = limits.find((limit) => limit.period === period && !limit.categoryId);
     if (enabled && amountPaise <= 0) return setToast('Enter a positive limit amount.');
     const limit = nextSyncRecord({ id: current?.id ?? makeId(), period, amountPaise, isActive: enabled, deleted: false }, current?.version ?? 0);
     await localStore.saveLimit(limit);
     await refreshLocal();
     setToast(`${period[0].toUpperCase()}${period.slice(1)} limit saved.`);
+  };
+
+  const saveCategoryLimit = async (categoryId: string, amount: string) => {
+    const amountPaise = paiseFromInput(amount);
+    if (amountPaise <= 0) return setToast('Enter a positive monthly category limit.');
+    const current = limits.find((limit) => limit.period === 'month' && limit.categoryId === categoryId && !limit.deleted);
+    await localStore.saveLimit(nextSyncRecord({ id: current?.id ?? makeId(), period: 'month', categoryId, amountPaise, isActive: true, deleted: false }, current?.version ?? 0));
+    await refreshLocal();
+    setToast('Monthly category limit saved.');
+  };
+
+  const saveCategory = async (category: Category & { deleted?: boolean }) => {
+    if (!category.deleted && userCategories.some((item) => item.id !== category.id && item.name.trim().toLowerCase() === category.name.trim().toLowerCase())) {
+      setToast('A category with that name already exists.');
+      return;
+    }
+    if (category.deleted) {
+      const fallbackId = userCategories.find((item) => item.id === 'other')?.id;
+      if (!fallbackId || category.id === fallbackId) return;
+      const [savedExpenses, savedChips, savedLimits] = await Promise.all([localStore.expenses(), localStore.quickAdd(), localStore.limits()]);
+      await Promise.all([
+        ...savedExpenses.filter((item) => item.categoryId === category.id && !item.deleted).map((item) => localStore.saveExpense(nextSyncRecord({ ...item, categoryId: fallbackId }, item.version))),
+        ...savedChips.filter((item) => item.categoryId === category.id && !item.deleted).map((item) => localStore.saveQuickAdd(nextSyncRecord({ ...item, categoryId: fallbackId }, item.version))),
+        ...savedLimits.filter((item) => item.categoryId === category.id && !item.deleted).map((item) => localStore.saveLimit(nextSyncRecord({ ...item, deleted: true }, item.version)))
+      ]);
+    }
+    await localStore.saveCategory(category);
+    await refreshLocal();
   };
 
   const saveSettings = async (next: Settings) => {
@@ -356,13 +430,13 @@ function App() {
     return groups;
   }, {});
 
-  if (!ready) return <main className="app-loading">Opening your private ledger…</main>;
+  if (!ready) return <main className="app-loading">Opening your private ledger·</main>;
 
   return <div className="app-shell">
     <header className="topbar">
       <button className="brand" onClick={() => setScreen('home')} aria-label="Spendwise home"><span>✦</span> Spendwise</button>
       <button className={`sync-button ${user ? 'is-connected' : ''}`} onClick={backupAndSync} disabled={syncing}>
-        <span>{syncing ? '↻' : user ? '☁' : '◌'}</span>{syncing ? 'Syncing…' : user ? (pendingCount ? `Back up ${pendingCount}` : 'Backed up') : 'Back up'}
+        <span>{syncing ? '↻' : user ? '☁' : '◌'}</span>{syncing ? 'Syncing·' : user ? (pendingCount ? `Back up ${pendingCount}` : 'Backed up') : 'Back up'}
       </button>
     </header>
 
@@ -377,9 +451,9 @@ function App() {
           <div className="section-heading"><div><p className="eyebrow">{editingExpense ? 'Edit details' : 'Quick entry'}</p><h2>{editingExpense ? 'Update this spend' : 'What did you spend?'}</h2></div>{editingExpense && <button className="text-button" onClick={() => { setEditingExpense(null); setDraft(blankDraft()); }}>Cancel edit</button>}</div>
           <form onSubmit={saveExpense} className="expense-form">
             <label className="amount-field"><span>Amount</span><div><b>₹</b><input inputMode="decimal" placeholder="0" value={draft.amount} onChange={(event) => setDraft((current) => ({ ...current, amount: event.target.value }))} autoFocus /></div></label>
-            <label className="wide-field"><span>For what?</span><input placeholder="Auto, groceries, tea…" value={draft.itemName} onChange={(event) => updateDraftFromItem(event.target.value)} /></label>
+            <label className="wide-field"><span>For what?</span><input placeholder="Auto, groceries, tea·" value={draft.itemName} onChange={(event) => updateDraftFromItem(event.target.value)} /></label>
             <label><span>Date</span><input type="date" value={draft.spentOn} onChange={(event) => setDraft((current) => ({ ...current, spentOn: event.target.value }))} /></label>
-            <label><span>Category</span><select value={draft.categoryId} onChange={(event) => setDraft((current) => ({ ...current, categoryId: event.target.value, tag: chooseDefaultTag(event.target.value) }))}>{categories.map((category) => <option value={category.id} key={category.id}>{category.icon} {category.name}</option>)}</select></label>
+            <label><span>Category</span><select value={draft.categoryId} onChange={(event) => setDraft((current) => ({ ...current, categoryId: event.target.value, tag: chooseDefaultTag(event.target.value) }))}>{userCategories.map((category) => <option value={category.id} key={category.id}>{category.icon} {category.name}</option>)}</select></label>
             <fieldset className="tag-toggle"><legend>Type</legend><button type="button" className={draft.tag === 'need' ? 'selected need' : ''} onClick={() => setDraft((current) => ({ ...current, tag: 'need' }))}>Need</button><button type="button" className={draft.tag === 'want' ? 'selected want' : ''} onClick={() => setDraft((current) => ({ ...current, tag: 'want' }))}>Want</button></fieldset>
             <label className="wide-field note-field"><span>Note <em>Optional</em></span><input placeholder="Anything useful to remember" value={draft.note} onChange={(event) => setDraft((current) => ({ ...current, note: event.target.value }))} /></label>
             <label className="quick-checkbox"><input type="checkbox" checked={draft.saveAsQuick} onChange={(event) => setDraft((current) => ({ ...current, saveAsQuick: event.target.checked }))} /> Save as a quick add</label>
@@ -388,23 +462,23 @@ function App() {
         </section>
 
         <section className="quick-section"><div className="section-heading"><div><p className="eyebrow">Your shortcuts</p><h2>Quick add</h2></div><button className="text-button" onClick={() => setScreen('settings')}>Manage</button></div>
-          {chips.filter((chip) => !chip.deleted).length ? <div className="chip-row">{chips.filter((chip) => !chip.deleted).sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || b.useCount - a.useCount).map((chip) => <button className="expense-chip" key={chip.id} onClick={() => useChip(chip)}><span>{categoryById(chip.categoryId).icon}</span><b>{chip.itemName}</b><small>{money(chip.defaultAmountPaise)}</small></button>)}</div> : <div className="soft-note">No default chips here—make shortcuts for only the things you use.</div>}
+          {chips.filter((chip) => !chip.deleted).length ? <div className="chip-row">{chips.filter((chip) => !chip.deleted).sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || b.useCount - a.useCount).map((chip) => <button className="expense-chip" key={chip.id} onClick={() => useChip(chip)}><span>{categoryById(chip.categoryId, userCategories).icon}</span><b>{chip.itemName}</b><small>{money(chip.defaultAmountPaise)}</small></button>)}</div> : <div className="soft-note">No default chips here·make shortcuts for only the things you use.</div>}
         </section>
 
-        <section className="limit-banner"><div><p className="eyebrow">This week</p><strong>{weekLimit ? `${money(weekTotal)} of ${money(weekLimit.amountPaise)}` : `${money(weekTotal)} spent`}</strong><span>{currentLimit.label}</span></div><div className="progress-track"><span className={`progress-fill ${currentLimit.tone}`} style={{ width: `${Math.min(currentLimit.percent, 100)}%` }} /></div><button onClick={() => setScreen('limits')}>View limits →</button></section>
+        <section className="card home-budget"><div className="section-heading"><div><p className="eyebrow">{monthRange.start} to {monthRange.end}</p><h2>Monthly budget</h2></div><button className="text-button" onClick={() => setScreen('limits')}>Manage budget</button></div><div className="home-budget-total"><strong>{money(monthTotal)}</strong><span>{monthLimit ? `of ${money(monthLimit.amountPaise)} · ${monthStatus.label}` : 'spent this cycle · no total budget set'}</span></div><div className="progress-track"><span className={`progress-fill ${monthStatus.tone}`} style={{ width: `${Math.min(monthStatus.percent, 100)}%` }} /></div><div className="home-category-grid">{monthCategories.map(({ category, spent, limit, status }) => <div className="home-category" key={category.id}><div><span>{category.icon} {category.name}</span><small>{limit ? `${money(spent)} / ${money(limit.amountPaise)}` : `${money(spent)} spent`}</small></div>{limit && <div className="progress-track"><span className={`progress-fill ${status.tone}`} style={{ width: `${Math.min(status.percent, 100)}%` }} /></div>}</div>)}</div><div className="home-week-summary"><span>Weekly: {weekLimit ? `${money(weekTotal)} of ${money(weekLimit.amountPaise)}` : `${money(weekTotal)} spent`}</span><span>{currentLimit.label}</span><div className="progress-track"><span className={`progress-fill ${currentLimit.tone}`} style={{ width: `${Math.min(currentLimit.percent, 100)}%` }} /></div><button className="text-button" onClick={() => setScreen('report')}>Weekly and monthly reports →</button></div></section>
 
-        <section className="recent-section"><div className="section-heading"><div><p className="eyebrow">Latest entries</p><h2>Recent spending</h2></div><button className="text-button" onClick={() => setScreen('history')}>See history</button></div>{visibleExpenses.length ? <ExpenseList expenses={visibleExpenses.sort((a, b) => b.spentOn.localeCompare(a.spentOn) || b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5)} onEdit={startEdit} onDelete={removeExpense} /> : <EmptyState title="Your ledger starts here" text="Add the small things first. The picture builds itself." />}</section>
+        <section className="recent-section"><div className="section-heading"><div><p className="eyebrow">Latest entries</p><h2>Recent spending</h2></div><button className="text-button" onClick={() => setScreen('history')}>See history</button></div>{visibleExpenses.length ? <ExpenseList expenses={visibleExpenses.sort((a, b) => b.spentOn.localeCompare(a.spentOn) || b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5)} onEdit={startEdit} onDelete={removeExpense} categories={userCategories} /> : <EmptyState title="Your ledger starts here" text="Add the small things first. The picture builds itself." />}</section>
       </>}
 
-      {screen === 'history' && <section><div className="page-title"><p className="eyebrow">Everything you logged</p><h1>History</h1></div><div className="filter-row"><label><span className="sr-only">Search</span><input value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Search an item" /></label><select value={historyTag} onChange={(event) => setHistoryTag(event.target.value as 'all' | NeedWant)}><option value="all">All types</option><option value="need">Needs</option><option value="want">Wants</option></select></div>{Object.keys(byDay).length ? Object.entries(byDay).sort(([a], [b]) => b.localeCompare(a)).map(([date, records]) => <section className="day-group" key={date}><div className="day-heading"><h2>{relativeDay(date)}</h2><span>{money(sumExpenses(records))}</span></div><ExpenseList expenses={records} onEdit={startEdit} onDelete={removeExpense} /></section>) : <EmptyState title="Nothing matches yet" text="Try a different search, or add your first expense." />}</section>}
+      {screen === 'history' && <section><div className="page-title"><p className="eyebrow">Everything you logged</p><h1>History</h1></div><div className="filter-row"><label><span className="sr-only">Search</span><input value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Search an item" /></label><select value={historyTag} onChange={(event) => setHistoryTag(event.target.value as 'all' | NeedWant)}><option value="all">All types</option><option value="need">Needs</option><option value="want">Wants</option></select></div>{Object.keys(byDay).length ? Object.entries(byDay).sort(([a], [b]) => b.localeCompare(a)).map(([date, records]) => <section className="day-group" key={date}><div className="day-heading"><h2>{relativeDay(date)}</h2><span>{money(sumExpenses(records))}</span></div><ExpenseList expenses={records} onEdit={startEdit} onDelete={removeExpense} categories={userCategories} /></section>) : <EmptyState title="Nothing matches yet" text="Try a different search, or add your first expense." />}</section>}
 
-      {screen === 'report' && <Report expenses={visibleExpenses} limits={limits} settings={settings} />}
+      {screen === 'report' && <Report expenses={visibleExpenses} limits={limits} settings={settings} categories={userCategories} fixedExpenses={fixedExpenses} />}
 
-      {screen === 'limits' && <Limits limits={limits} expenses={visibleExpenses} settings={settings} onSave={saveLimit} />}
+      {screen === 'limits' && <Limits limits={limits} expenses={visibleExpenses} settings={settings} categories={userCategories} fixedExpenses={fixedExpenses} onSave={saveLimit} onSaveSettings={saveSettings} onSaveCategoryLimit={saveCategoryLimit} onSaveCategory={saveCategory} onSaveFixed={async (fixed) => { await localStore.saveFixedExpense(fixed); await refreshLocal(); }} />}
 
-      {screen === 'settings' && <section><div className="page-title"><p className="eyebrow">Control your data</p><h1>Settings</h1></div><div className="settings-grid"><section className="card settings-card"><p className="eyebrow">Cloud backup</p><h2>{user ? `Backed up as ${user.displayName}` : 'Keep a private backup'}</h2><p>{user ? 'Your Google account is only used to identify your private backup. We never read email or contacts.' : 'Your expenses remain on this device until you choose Google sign-in and Back up.'}</p>{user ? <div className="account-row">{user.picture ? <img src={user.picture} alt="" referrerPolicy="no-referrer" /> : <span className="avatar">{user.displayName.slice(0, 1)}</span>}<div><b>{user.displayName}</b><span>{user.email}</span></div><button className="text-button" onClick={async () => { await signOut(); setUser(null); setToast('Signed out. Your local data remains on this device.'); }}>Sign out</button></div> : <GoogleButton onSuccess={handleGoogle} onError={setToast} />}{user && <button className="primary-button full-button" onClick={backupAndSync} disabled={syncing}>{syncing ? 'Syncing…' : pendingCount ? `Back up ${pendingCount} change${pendingCount === 1 ? '' : 's'}` : 'Sync now'}</button>}</section>
+      {screen === 'settings' && <section><div className="page-title"><p className="eyebrow">Control your data</p><h1>Settings</h1></div><div className="settings-grid"><section className="card settings-card"><p className="eyebrow">Cloud backup</p><h2>{user ? `Backed up as ${user.displayName}` : 'Keep a private backup'}</h2><p>{user ? 'Your Google account is only used to identify your private backup. We never read email or contacts.' : 'Your expenses remain on this device until you choose Google sign-in and Back up.'}</p>{user ? <div className="account-row">{user.picture ? <img src={user.picture} alt="" referrerPolicy="no-referrer" /> : <span className="avatar">{user.displayName.slice(0, 1)}</span>}<div><b>{user.displayName}</b><span>{user.email}</span></div><button className="text-button" onClick={async () => { await signOut(); setUser(null); setToast('Signed out. Your local data remains on this device.'); }}>Sign out</button></div> : <GoogleButton onSuccess={handleGoogle} onError={setToast} />}{user && <button className="primary-button full-button" onClick={backupAndSync} disabled={syncing}>{syncing ? 'Syncing·' : pendingCount ? `Back up ${pendingCount} change${pendingCount === 1 ? '' : 's'}` : 'Sync now'}</button>}</section>
         <section className="card settings-card"><p className="eyebrow">Preferences</p><h2>Make it yours</h2><label className="settings-label">Week starts on<select value={settings.weekStart} onChange={(event) => saveSettings({ ...settings, weekStart: Number(event.target.value) as 0 | 1 })}><option value={1}>Monday</option><option value={0}>Sunday</option></select></label><label className="settings-label">Language<select value={settings.language} onChange={(event) => saveSettings({ ...settings, language: event.target.value as 'en' | 'hi' })}><option value="en">English</option><option value="hi">Hindi</option></select></label><label className="reminder-row"><input type="checkbox" checked={settings.reminderEnabled} onChange={(event) => toggleReminder(event.target.checked)} /><span><b>Daily reminder</b><small>At {settings.reminderTime}; keep Spendwise open to receive it</small></span><input type="time" value={settings.reminderTime} onChange={(event) => saveSettings({ ...settings, reminderTime: event.target.value })} /></label>{settings.reminderEnabled && <button className="text-button reminder-test" type="button" onClick={testReminder}>Send test notification</button>}</section>
-        <section className="card settings-card quick-manager"><p className="eyebrow">Your shortcuts</p><h2>Quick add shelf</h2><p>Create only the shortcuts that make your own day faster.</p><form className="quick-form" onSubmit={saveChip}><input placeholder="Item, e.g. Tea" value={chipDraft.itemName} onChange={(event) => setChipDraft((current) => ({ ...current, itemName: event.target.value }))} /><input inputMode="decimal" placeholder="Amount" value={chipDraft.amount} onChange={(event) => setChipDraft((current) => ({ ...current, amount: event.target.value }))} /><select value={chipDraft.categoryId} onChange={(event) => setChipDraft((current) => ({ ...current, categoryId: event.target.value, tag: chooseDefaultTag(event.target.value) }))}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select><select value={chipDraft.tag} onChange={(event) => setChipDraft((current) => ({ ...current, tag: event.target.value as NeedWant }))}><option value="need">Need</option><option value="want">Want</option></select><button className="secondary-button" type="submit">Add quick add</button></form><div className="managed-chip-list">{chips.filter((chip) => !chip.deleted).length ? chips.filter((chip) => !chip.deleted).map((chip) => <div key={chip.id}><span>{categoryById(chip.categoryId).icon}</span><b>{chip.itemName}</b><small>{money(chip.defaultAmountPaise)}</small><button aria-label={`Remove ${chip.itemName}`} onClick={() => removeChip(chip)}>×</button></div>) : <p className="hint">No quick adds yet.</p>}</div></section></div></section>}
+        <section className="card settings-card quick-manager"><p className="eyebrow">Your shortcuts</p><h2>Quick add shelf</h2><p>Create only the shortcuts that make your own day faster.</p><form className="quick-form" onSubmit={saveChip}><input placeholder="Item, e.g. Tea" value={chipDraft.itemName} onChange={(event) => setChipDraft((current) => ({ ...current, itemName: event.target.value }))} /><input inputMode="decimal" placeholder="Amount" value={chipDraft.amount} onChange={(event) => setChipDraft((current) => ({ ...current, amount: event.target.value }))} /><select value={chipDraft.categoryId} onChange={(event) => setChipDraft((current) => ({ ...current, categoryId: event.target.value, tag: chooseDefaultTag(event.target.value) }))}>{userCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select><select value={chipDraft.tag} onChange={(event) => setChipDraft((current) => ({ ...current, tag: event.target.value as NeedWant }))}><option value="need">Need</option><option value="want">Want</option></select><button className="secondary-button" type="submit">Add quick add</button></form><div className="managed-chip-list">{chips.filter((chip) => !chip.deleted).length ? chips.filter((chip) => !chip.deleted).map((chip) => <div key={chip.id}><span>{categoryById(chip.categoryId, userCategories).icon}</span><b>{chip.itemName}</b><small>{money(chip.defaultAmountPaise)}</small><button aria-label={`Remove ${chip.itemName}`} onClick={() => removeChip(chip)}>·</button></div>) : <p className="hint">No quick adds yet.</p>}</div></section></div></section>}
     </main>
 
     <nav className="bottom-nav" aria-label="Primary navigation">{([['home', '⌂', 'Add'], ['history', '≡', 'History'], ['report', '◔', 'Report'], ['limits', '◎', 'Limits'], ['settings', '⚙', 'Settings']] as [Screen, string, string][]).map(([target, icon, label]) => <button key={target} className={screen === target ? 'active' : ''} onClick={() => setScreen(target)}><span>{icon}</span>{label}</button>)}</nav>
@@ -412,37 +486,61 @@ function App() {
   </div>;
 }
 
-function ExpenseList({ expenses, onEdit, onDelete }: { expenses: Expense[]; onEdit: (expense: Expense) => void; onDelete: (expense: Expense) => void }) {
-  return <div className="expense-list">{expenses.map((expense) => <article className="expense-row" key={expense.id}><div className="category-badge">{categoryById(expense.categoryId).icon}</div><button className="expense-details" onClick={() => onEdit(expense)}><b>{expense.itemName}</b><span>{categoryById(expense.categoryId).name} · <em className={expense.tag}>{expense.tag}</em></span></button><strong>{money(expense.amountPaise)}</strong><button className="delete-button" onClick={() => onDelete(expense)} aria-label={`Delete ${expense.itemName}`}>×</button></article>)}</div>;
+function ExpenseList({ expenses, onEdit, onDelete, categories: available = categories }: { expenses: Expense[]; onEdit: (expense: Expense) => void; onDelete: (expense: Expense) => void; categories?: Category[] }) {
+  return <div className="expense-list">{expenses.map((expense) => <article className="expense-row" key={expense.id}><div className="category-badge">{expense.fixedExpenseId ? '🔁' : categoryById(expense.categoryId, available).icon}</div><button className="expense-details" onClick={() => onEdit(expense)}><b>{expense.itemName}</b><span>{expense.fixedExpenseId ? 'Fixed expense' : categoryById(expense.categoryId, available).name} · <em className={expense.tag}>{expense.tag}</em></span></button><strong>{money(expense.amountPaise)}</strong><button className="delete-button" onClick={() => onDelete(expense)} aria-label={`Delete ${expense.itemName}`}>×</button></article>)}</div>;
 }
 
-function Limits({ limits, expenses, settings, onSave }: { limits: SpendingLimit[]; expenses: Expense[]; settings: Settings; onSave: (period: Period, amount: string, enabled: boolean) => void }) {
-  const [values, setValues] = useState<Record<Period, string>>(() => ({ week: String((activeLimit(limits, 'week')?.amountPaise ?? 0) / 100 || ''), month: String((activeLimit(limits, 'month')?.amountPaise ?? 0) / 100 || ''), year: String((activeLimit(limits, 'year')?.amountPaise ?? 0) / 100 || '') }));
+function Limits({ limits, expenses, settings, categories: available, fixedExpenses, onSave, onSaveSettings, onSaveCategoryLimit, onSaveCategory, onSaveFixed }: { limits: SpendingLimit[]; expenses: Expense[]; settings: Settings; categories: Category[]; fixedExpenses: FixedExpense[]; onSave: (period: Period, amount: string, enabled: boolean) => void; onSaveSettings: (settings: Settings) => void; onSaveCategoryLimit: (categoryId: string, amount: string) => void; onSaveCategory: (category: Category & { deleted?: boolean }) => void; onSaveFixed: (record: FixedExpense) => void }) {
+  const [values, setValues] = useState<Record<'week' | 'month', string>>(() => ({ week: String((activeLimit(limits, 'week')?.amountPaise ?? 0) / 100 || ''), month: String((activeLimit(limits, 'month')?.amountPaise ?? 0) / 100 || '') }));
+  const [categoryDraft, setCategoryDraft] = useState({ name: '', icon: '✨' });
+  const [categoryValues, setCategoryValues] = useState<Record<string, string>>(() => Object.fromEntries(available.map((category) => [category.id, String((limits.find((limit) => limit.categoryId === category.id && !limit.deleted)?.amountPaise ?? 0) / 100 || '')])));
+  const [fixedDraft, setFixedDraft] = useState({ name: '', amount: '', day: '1' });
+  const [editingCategory, setEditingCategory] = useState<string | null>(null);
+  const [editingFixed, setEditingFixed] = useState<string | null>(null);
+  const [categoryName, setCategoryName] = useState('');
+  const [fixedEdits, setFixedEdits] = useState<Record<string, { name: string; amount: string; day: string }>>({});
   const current = (period: Period) => {
-    const range = dateRange(period, new Date(), settings.weekStart);
-    return sumExpenses(expensesInRange(expenses, range.start, range.end));
+    const range = period === 'month' ? monthlyCycleRange(new Date(), settings.monthStartDay, settings.monthEndDay) : dateRange(period, new Date(), settings.weekStart);
+    const ranged = expensesInRange(expenses, range.start, range.end);
+    return sumExpenses(period === 'month' ? ranged.filter((expense) => !expense.fixedExpenseId || fixedExpenses.some((fixed) => fixed.id === expense.fixedExpenseId && fixed.includeInMonthlyBudget)) : ranged);
   };
-  return <section><div className="page-title"><p className="eyebrow">Gentle guardrails</p><h1>Spending limits</h1><p>Limits are private signals, never a judgement.</p></div><div className="limit-cards">{(['week', 'month', 'year'] as Period[]).map((period) => { const limit = activeLimit(limits, period); const spent = current(period); const status = limitStatus(spent, limit); return <article className="card limit-card" key={period}><div><p className="eyebrow">Per {period}</p><h2>{limit ? money(limit.amountPaise) : 'No limit'}</h2><span>{money(spent)} spent</span></div><div className="progress-track"><span className={`progress-fill ${status.tone}`} style={{ width: `${Math.min(status.percent, 100)}%` }} /></div><div className="limit-editor"><label><span>Limit amount</span><input inputMode="decimal" placeholder="No limit" value={values[period]} onChange={(event) => setValues((currentValues) => ({ ...currentValues, [period]: event.target.value }))} /></label><label className="switch"><input type="checkbox" checked={Boolean(limit)} onChange={(event) => onSave(period, values[period], event.target.checked)} /><span>Enabled</span></label><button className="secondary-button" onClick={() => onSave(period, values[period], true)}>Save</button></div></article>; })}</div></section>;
+  const activeFixed = fixedExpenses.filter((record) => record.isActive && !record.deleted);
+  const monthlyLimit = activeLimit(limits, 'month');
+  const monthlySpent = current('month');
+  const allocated = available.reduce((total, category) => total + (limits.find((limit) => limit.categoryId === category.id && !limit.deleted)?.amountPaise ?? 0), 0);
+  const monthlyStatus = limitStatus(monthlySpent, monthlyLimit);
+  return <section><div className="page-title"><p className="eyebrow">Plan your spending</p><h1>Monthly budget</h1><p>Set one monthly budget, then divide it across the categories that matter to you.</p></div><div className="limit-cards">{(['week'] as const).map((period) => { const limit = activeLimit(limits, period); const spent = current(period); const status = limitStatus(spent, limit); return <article className="card limit-card" key={period}><div><p className="eyebrow">Weekly guardrail</p><h2>{limit ? money(limit.amountPaise) : 'No limit'}</h2><span>{money(spent)} spent</span></div><div className="progress-track"><span className={`progress-fill ${status.tone}`} style={{ width: `${Math.min(status.percent, 100)}%` }} /></div><div className="limit-editor"><label><span>Limit amount</span><input inputMode="decimal" placeholder="No limit" value={values[period]} onChange={(event) => setValues((currentValues) => ({ ...currentValues, [period]: event.target.value }))} /></label><label className="switch"><input type="checkbox" checked={Boolean(limit)} onChange={(event) => onSave(period, values[period], event.target.checked)} /><span>Enabled</span></label><button className="secondary-button" onClick={() => onSave(period, values[period], true)}>Save</button></div></article>; })}</div>
+    <section className="card settings-card feature-card"><p className="eyebrow">Monthly plan</p><h2>{monthlyLimit ? `${money(monthlySpent)} of ${money(monthlyLimit.amountPaise)} spent` : `${money(monthlySpent)} spent this cycle`}</h2><p>Category allocations: {money(allocated)} of {monthlyLimit ? money(monthlyLimit.amountPaise) : 'no monthly budget'}{allocated > (monthlyLimit?.amountPaise ?? 0) && monthlyLimit ? ' · allocations exceed your budget' : ''}</p><div className="progress-track"><span className={`progress-fill ${monthlyStatus.tone}`} style={{ width: `${Math.min(monthlyStatus.percent, 100)}%` }} /></div><div className="limit-editor"><label><span>Total monthly budget</span><input inputMode="decimal" placeholder="e.g. 30000" value={values.month} onChange={(event) => setValues((currentValues) => ({ ...currentValues, month: event.target.value }))} /></label><button className="secondary-button" onClick={() => onSave('month', values.month, true)}>Save monthly budget</button></div><div className="cycle-settings"><label>Cycle starts on day<select value={settings.monthStartDay} onChange={(event) => onSaveSettings({ ...settings, monthStartDay: Number(event.target.value) })}>{Array.from({ length: 31 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}</option>)}</select></label><label>Cycle ends on day<select value={settings.monthEndDay} onChange={(event) => onSaveSettings({ ...settings, monthEndDay: Number(event.target.value) })}>{Array.from({ length: 31 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}</option>)}</select></label><small>When the end day is earlier than the start day, the cycle ends in the following month. Short months use their last calendar day.</small></div></section>
+    <section className="card settings-card feature-card"><p className="eyebrow">Category allocations</p><h2>Distribute your monthly budget</h2><p>Category limits apply to regular expenses only. Fixed expenses are included in this monthly budget only when you opt in below.</p>{available.map((category) => { const cycle = monthlyCycleRange(new Date(), settings.monthStartDay, settings.monthEndDay); const spent = sumExpenses(expensesInRange(expenses, cycle.start, cycle.end).filter((expense) => !expense.fixedExpenseId && expense.categoryId === category.id)); const allocation = limits.find((limit) => limit.categoryId === category.id && !limit.deleted); return <div className="feature-row" key={category.id}><span>{category.icon} {category.name}</span><small>{money(spent)}{allocation ? ` of ${money(allocation.amountPaise)}` : ' spent'}</small><input aria-label={`${category.name} monthly allocation`} inputMode="decimal" placeholder="Monthly allocation" value={categoryValues[category.id] ?? ''} onChange={(event) => setCategoryValues((values) => ({ ...values, [category.id]: event.target.value }))} /><button className="secondary-button" onClick={() => onSaveCategoryLimit(category.id, categoryValues[category.id] ?? '')}>Save</button></div>; })}</section>
+    <section className="card settings-card feature-card"><p className="eyebrow">Your categories</p><h2>Manage categories</h2><form className="feature-form" onSubmit={(event) => { event.preventDefault(); const name = categoryDraft.name.trim(); if (!name) return; const category: Category = { id: makeId(), name, icon: categoryDraft.icon || '✨', defaultTag: 'need', keywords: [] }; onSaveCategory(nextSyncRecord({ ...category, deleted: false })); setCategoryDraft({ name: '', icon: '✨' }); }}><input placeholder="Category name" value={categoryDraft.name} onChange={(event) => setCategoryDraft({ ...categoryDraft, name: event.target.value })} /><input aria-label="Category icon" value={categoryDraft.icon} onChange={(event) => setCategoryDraft({ ...categoryDraft, icon: event.target.value })} /><button className="secondary-button">Add category</button></form>{available.map((category) => <div className="feature-row" key={category.id}>{editingCategory === category.id ? <><input value={categoryName} onChange={(event) => setCategoryName(event.target.value)} /><button className="secondary-button" onClick={() => { onSaveCategory(nextSyncRecord({ ...category, name: categoryName.trim() || category.name }, (category as Category & { version?: number }).version ?? 0)); setEditingCategory(null); }}>Save</button></> : <><span>{category.icon} {category.name}</span><button className="text-button" onClick={() => { setEditingCategory(category.id); setCategoryName(category.name); }}>Edit</button><button className="text-button" onClick={() => onSaveCategory(nextSyncRecord({ ...category, deleted: true }, (category as Category & { version?: number }).version ?? 0))} disabled={available.length <= 1 || category.id === 'other'}>Delete</button></>}</div>)}</section>
+    <section className="card settings-card feature-card"><p className="eyebrow">Rent and subscriptions</p><h2>Fixed monthly expenses</h2><p>Added to your ledger automatically when you open Spendwise on or after the scheduled day.</p><form className="feature-form" onSubmit={(event) => { event.preventDefault(); const amountPaise = paiseFromInput(fixedDraft.amount); if (!fixedDraft.name.trim() || amountPaise <= 0) return; const record = nextSyncRecord({ id: makeId(), name: fixedDraft.name.trim(), amountPaise, dayOfMonth: Math.min(31, Math.max(1, Number(fixedDraft.day) || 1)), createdOn: today(), isActive: true, includeInMonthlyBudget: false, deleted: false }); onSaveFixed(record); setFixedDraft({ name: '', amount: '', day: '1' }); }}><input placeholder="Expense name" value={fixedDraft.name} onChange={(event) => setFixedDraft({ ...fixedDraft, name: event.target.value })} /><input inputMode="decimal" placeholder="Amount" value={fixedDraft.amount} onChange={(event) => setFixedDraft({ ...fixedDraft, amount: event.target.value })} /><label>Day <input type="number" min="1" max="31" value={fixedDraft.day} onChange={(event) => setFixedDraft({ ...fixedDraft, day: event.target.value })} /></label><button className="secondary-button">Add fixed expense</button></form>{activeFixed.map((record) => { const edit = fixedEdits[record.id] ?? { name: record.name, amount: String(record.amountPaise / 100), day: String(record.dayOfMonth) }; return <div className="feature-row" key={record.id}>{editingFixed === record.id ? <><input value={edit.name} onChange={(event) => setFixedEdits({ ...fixedEdits, [record.id]: { ...edit, name: event.target.value } })} /><input inputMode="decimal" value={edit.amount} onChange={(event) => setFixedEdits({ ...fixedEdits, [record.id]: { ...edit, amount: event.target.value } })} /><input type="number" min="1" max="31" value={edit.day} onChange={(event) => setFixedEdits({ ...fixedEdits, [record.id]: { ...edit, day: event.target.value } })} /><button className="secondary-button" onClick={() => { onSaveFixed(nextSyncRecord({ ...record, name: edit.name, amountPaise: paiseFromInput(edit.amount), dayOfMonth: Math.min(31, Math.max(1, Number(edit.day) || 1)) }, record.version)); setEditingFixed(null); }}>Save</button></> : <><span>{record.name} · {money(record.amountPaise)} on day {record.dayOfMonth}</span><label className="budget-toggle"><input type="checkbox" checked={Boolean(record.includeInMonthlyBudget)} onChange={(event) => onSaveFixed(nextSyncRecord({ ...record, includeInMonthlyBudget: event.target.checked }, record.version))} /> Include in monthly budget</label><button className="text-button" onClick={() => setEditingFixed(record.id)}>Edit</button><button className="text-button" onClick={() => onSaveFixed(nextSyncRecord({ ...record, isActive: false, deleted: true }, record.version))}>Delete</button></>}</div>; })}</section>
+  </section>;
 }
 
-function Report({ expenses, limits, settings }: { expenses: Expense[]; limits: SpendingLimit[]; settings: Settings }) {
-  const range = dateRange('week', new Date(), settings.weekStart);
+function Report({ expenses, limits, settings, categories: available = categories, fixedExpenses = [] }: { expenses: Expense[]; limits: SpendingLimit[]; settings: Settings; categories?: Category[]; fixedExpenses?: FixedExpense[] }) {
+  const [period, setPeriod] = useState<'week' | 'month'>('month');
+  const anchor = new Date();
+  const range = period === 'week' ? dateRange('week', anchor, settings.weekStart) : monthlyCycleRange(anchor, settings.monthStartDay, settings.monthEndDay);
   const records = expensesInRange(expenses, range.start, range.end);
   const total = sumExpenses(records);
-  const lastAnchor = new Date();
-  lastAnchor.setDate(lastAnchor.getDate() - 7);
-  const previousRange = dateRange('week', lastAnchor, settings.weekStart);
+  const previousAnchor = new Date(`${range.start}T12:00:00`);
+  previousAnchor.setDate(previousAnchor.getDate() - 1);
+  const previousRange = period === 'week' ? dateRange('week', previousAnchor, settings.weekStart) : monthlyCycleRange(previousAnchor, settings.monthStartDay, settings.monthEndDay);
   const previous = sumExpenses(expensesInRange(expenses, previousRange.start, previousRange.end));
   const difference = total - previous;
-  const categoryTotals = categories.map((category) => ({ ...category, total: sumExpenses(records.filter((expense) => expense.categoryId === category.id)) })).filter((category) => category.total > 0).sort((a, b) => b.total - a.total);
+  const categoryTotals = available.map((category) => ({ ...category, total: sumExpenses(records.filter((expense) => !expense.fixedExpenseId && expense.categoryId === category.id)) })).filter((category) => category.total > 0).sort((a, b) => b.total - a.total);
+  const fixedTotal = sumExpenses(records.filter((expense) => Boolean(expense.fixedExpenseId)));
   const maximum = Math.max(...categoryTotals.map((category) => category.total), 1);
   const need = sumExpenses(records.filter((expense) => expense.tag === 'need'));
   const want = sumExpenses(records.filter((expense) => expense.tag === 'want'));
-  const days = datesForWeek(new Date(), settings.weekStart).map((date) => ({ date, total: sumExpenses(records.filter((expense) => expense.spentOn === date)) }));
+  const days = (period === 'week' ? datesForWeek(anchor, settings.weekStart) : datesInRange(range.start, range.end)).map((date) => ({ date, total: sumExpenses(records.filter((expense) => expense.spentOn === date)) }));
   const dayMaximum = Math.max(...days.map((day) => day.total), 1);
-  const limit = activeLimit(limits, 'week');
-  const status = limitStatus(total, limit);
-  return <section><div className="page-title"><p className="eyebrow">{range.start} — {range.end}</p><h1>This week</h1><p className="report-total">{money(total)}</p><p className={difference > 0 ? 'up' : 'down'}>{previous ? `${difference >= 0 ? '+' : ''}${money(difference)} compared with last week` : 'Your first week is taking shape.'}</p></div><div className="report-grid"><article className="card report-card"><p className="eyebrow">Where it went</p><h2>By category</h2><div className="category-bars">{categoryTotals.length ? categoryTotals.map((category) => <div key={category.id}><span>{category.icon} {category.name}</span><div><i style={{ width: `${(category.total / maximum) * 100}%` }} /></div><b>{money(category.total)}</b></div>) : <p className="hint">Add a few expenses to see a pattern.</p>}</div></article><article className="card report-card"><p className="eyebrow">Your rhythm</p><h2>Daily spending</h2><div className="daily-bars">{days.map((day) => <div key={day.date}><b style={{ height: `${Math.max((day.total / dayMaximum) * 100, day.total ? 8 : 2)}%` }} title={`${day.date}: ${money(day.total)}`} /><span>{new Intl.DateTimeFormat('en-IN', { weekday: 'narrow' }).format(new Date(`${day.date}T12:00:00`))}</span></div>)}</div></article><article className="card report-card split-card"><p className="eyebrow">Need and want</p><h2>Choice, not guilt</h2><div className="split-ring" style={{ background: `conic-gradient(var(--need) 0 ${(need / Math.max(total, 1)) * 100}%, var(--want) ${(need / Math.max(total, 1)) * 100}% 100%)` }}><span>{total ? Math.round((want / total) * 100) : 0}%<small>wants</small></span></div><div className="split-labels"><span><i className="need-dot" />Needs <b>{money(need)}</b></span><span><i className="want-dot" />Wants <b>{money(want)}</b></span></div></article><article className="card report-card"><p className="eyebrow">Your weekly limit</p><h2>{limit ? status.label : 'No weekly limit'}</h2><p>{limit ? `${money(total)} of ${money(limit.amountPaise)}` : 'Set a comfortable weekly limit whenever it helps.'}</p><div className="progress-track"><span className={`progress-fill ${status.tone}`} style={{ width: `${Math.min(status.percent, 100)}%` }} /></div></article></div></section>;
+  const limit = activeLimit(limits, period);
+  const budgetRecords = records.filter((expense) => !expense.fixedExpenseId || fixedExpenses.some((fixed) => fixed.id === expense.fixedExpenseId && fixed.includeInMonthlyBudget));
+  const budgetSpent = period === 'month' ? sumExpenses(budgetRecords) : total;
+  const status = limitStatus(budgetSpent, limit);
+  const monthLabel = period === 'month' ? 'this monthly cycle' : 'this week';
+  return <section><div className="page-title"><p className="eyebrow">Spending insights</p><h1>Reports</h1><div className="period-switch"><button className={period === 'week' ? 'selected' : ''} onClick={() => setPeriod('week')}>Weekly</button><button className={period === 'month' ? 'selected' : ''} onClick={() => setPeriod('month')}>Monthly</button></div><p className="eyebrow">{range.start} · {range.end}</p><p className="report-total">{money(total)}</p><p className={difference > 0 ? 'up' : 'down'}>{previous ? `${difference >= 0 ? '+' : ''}${money(difference)} compared with the previous ${period === 'week' ? 'week' : 'cycle'}` : 'Your spending pattern is taking shape.'}</p></div><div className="report-grid"><article className="card report-card"><p className="eyebrow">Where it went</p><h2>By category</h2><div className="category-bars">{categoryTotals.length ? categoryTotals.map((category) => <div key={category.id}><span>{category.icon} {category.name}</span><div><i style={{ width: `${(category.total / maximum) * 100}%` }} /></div><b>{money(category.total)}</b></div>) : <p className="hint">Add a few expenses to see a pattern.</p>}</div><p className="hint">Fixed expenses: <strong>{money(fixedTotal)}</strong></p></article><article className="card report-card daily-report-card"><p className="eyebrow">Daily track</p><h2>Spending each day</h2><div className="daily-scroll"><div className={`daily-bars ${period === 'month' ? 'monthly-bars' : ''}`}>{days.map((day) => <div key={day.date}><b style={{ height: `${Math.max((day.total / dayMaximum) * 100, day.total ? 8 : 2)}%` }} title={`${day.date}: ${money(day.total)}`} /><span>{period === 'week' ? new Intl.DateTimeFormat('en-IN', { weekday: 'narrow' }).format(new Date(`${day.date}T12:00:00`)) : Number(day.date.slice(-2))}</span></div>)}</div></div>{period === 'month' && <div className="daily-breakdown">{days.map((day) => <div key={day.date}><span>{new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', weekday: 'short' }).format(new Date(`${day.date}T12:00:00`))}</span><b>{money(day.total)}</b></div>)}</div>}</article><article className="card report-card split-card"><p className="eyebrow">Need and want</p><h2>Choice, not guilt</h2><div className="split-ring" style={{ background: `conic-gradient(var(--need) 0 ${(need / Math.max(total, 1)) * 100}%, var(--want) ${(need / Math.max(total, 1)) * 100}% 100%)` }}><span>{total ? Math.round((want / total) * 100) : 0}%<small>wants</small></span></div><div className="split-labels"><span><i className="need-dot" />Needs <b>{money(need)}</b></span><span><i className="want-dot" />Wants <b>{money(want)}</b></span></div></article><article className="card report-card"><p className="eyebrow">{period === 'week' ? 'Weekly limit' : 'Monthly budget'}</p><h2>{limit ? status.label : `No ${period} limit`}</h2><p>{limit ? `${money(budgetSpent)} of ${money(limit.amountPaise)}` : `${money(total)} total expenses`}</p><p>Fixed expenses: {money(fixedTotal)}</p><div className="progress-track"><span className={`progress-fill ${status.tone}`} style={{ width: `${Math.min(status.percent, 100)}%` }} /></div></article></div></section>;
 }
 
 export default App;
