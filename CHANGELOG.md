@@ -41,6 +41,17 @@ This file tracks implemented changes and the next work that has been identified.
 
 - The manifest previously declared only a scalable SVG icon. Chromium install criteria require raster icons at 192px and 512px; without them the browser may not offer a full app install.
 
+## 2026-10-14 - Reminder catch-up when Spendwise reopens
+
+### Implemented
+
+- If Spendwise becomes active after the selected reminder time and today's reminder has not appeared, it now sends one catch-up notification instead of silently waiting until tomorrow.
+- The scheduler still sends no more than one reminder per local calendar day.
+
+### Remaining platform limit
+
+- Closing or force-stopping the installed PWA cancels its page timer. Guaranteed notifications while closed require a native Android scheduled notification or a deployed push service.
+
 ## 2026-10-14 — Android install path and repository review
 
 ### Implemented

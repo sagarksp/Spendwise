@@ -17,7 +17,8 @@ import {
   paiseFromInput,
   relativeDay,
   sumExpenses,
-  today
+  today,
+  toDateInput
 } from './domain';
 import { localStore } from './storage';
 import type { AuthUser, Expense, NeedWant, Period, QuickAdd, Screen, Settings, SpendingLimit } from './types';
@@ -117,12 +118,14 @@ function App() {
     let disposed = false;
     const scheduleNext = () => {
       const [hours, minutes] = settings.reminderTime.split(':').map(Number);
-      const scheduled = new Date();
+      const now = new Date();
+      const scheduled = new Date(now);
       scheduled.setHours(hours, minutes, 0, 0);
-      if (scheduled.getTime() <= Date.now()) scheduled.setDate(scheduled.getDate() + 1);
+      const alreadyShownToday = localStorage.getItem(`spendwise-reminder-shown-${today()}`) === today();
+      if (scheduled.getTime() <= now.getTime() && alreadyShownToday) scheduled.setDate(scheduled.getDate() + 1);
+      const reminderDate = toDateInput(scheduled);
       timer = window.setTimeout(() => {
-        const dayKey = `spendwise-reminder-shown-${today()}`;
-        if (localStorage.getItem(dayKey) === today()) {
+        if (today() !== reminderDate || localStorage.getItem(`spendwise-reminder-shown-${reminderDate}`) === reminderDate) {
           scheduleNext();
           return;
         }
@@ -132,7 +135,7 @@ function App() {
           badge: '/icons/spendwise.svg',
           tag: 'spendwise-daily-reminder',
           data: { url: '/' }
-        })).then(() => localStorage.setItem(dayKey, today())).catch((error: unknown) => {
+        })).then(() => localStorage.setItem(`spendwise-reminder-shown-${reminderDate}`, reminderDate)).catch((error: unknown) => {
           console.error('Spendwise could not show the reminder notification.', error);
         }).finally(() => {
           if (!disposed) scheduleNext();
