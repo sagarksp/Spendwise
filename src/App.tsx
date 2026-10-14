@@ -109,6 +109,40 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    if (!ready || !settings.reminderEnabled || !('Notification' in window) || Notification.permission !== 'granted' || !('serviceWorker' in navigator)) return;
+
+    let timer = 0;
+    let disposed = false;
+    const scheduleNext = () => {
+      const [hours, minutes] = settings.reminderTime.split(':').map(Number);
+      const scheduled = new Date();
+      scheduled.setHours(hours, minutes, 0, 0);
+      if (scheduled.getTime() <= Date.now()) scheduled.setDate(scheduled.getDate() + 1);
+      timer = window.setTimeout(() => {
+        const dayKey = `spendwise-reminder-shown-${today()}`;
+        if (localStorage.getItem(dayKey) === today()) {
+          scheduleNext();
+          return;
+        }
+        void navigator.serviceWorker.ready.then((registration) => registration.showNotification('Time for a quick money check-in?', {
+          body: 'Take a moment to add today\'s expenses to Spendwise.',
+          icon: '/icons/spendwise.svg',
+          badge: '/icons/spendwise.svg',
+          tag: 'spendwise-daily-reminder',
+          data: { url: '/' }
+        })).then(() => localStorage.setItem(dayKey, today())).catch((error: unknown) => {
+          console.error('Spendwise could not show the reminder notification.', error);
+        }).finally(() => {
+          if (!disposed) scheduleNext();
+        });
+      }, Math.max(0, scheduled.getTime() - Date.now()));
+    };
+    scheduleNext();
+
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [ready, settings.reminderEnabled, settings.reminderTime]);
+
   const visibleExpenses = useMemo(() => expenses.filter((expense) => !expense.deleted), [expenses]);
   const todayExpenses = useMemo(() => visibleExpenses.filter((expense) => expense.spentOn === today()), [visibleExpenses]);
   const todayTotal = sumExpenses(todayExpenses);
@@ -224,6 +258,31 @@ function App() {
     await localStore.saveSettings(next);
   };
 
+  const toggleReminder = async (enabled: boolean) => {
+    if (!enabled) {
+      await saveSettings({ ...settings, reminderEnabled: false });
+      setToast('Daily reminder turned off.');
+      return;
+    }
+    if (!window.isSecureContext || !('Notification' in window) || !('serviceWorker' in navigator)) {
+      setToast('Notifications need an installed app or a secure HTTPS page in a supported browser.');
+      return;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        setToast(permission === 'denied' ? 'Notifications are blocked. Allow them for Spendwise in your browser settings.' : 'Allow notifications to turn on your daily reminder.');
+        return;
+      }
+      await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+      await saveSettings({ ...settings, reminderEnabled: true });
+      setToast(`Daily reminder enabled for ${settings.reminderTime}. Keep Spendwise open to receive it.`);
+    } catch {
+      setToast('Could not enable notifications. Check the browser notification permission and try again.');
+    }
+  };
+
   const backupAndSync = async () => {
     if (!user) return setScreen('settings');
     setSyncing(true);
@@ -312,7 +371,7 @@ function App() {
       {screen === 'limits' && <Limits limits={limits} expenses={visibleExpenses} settings={settings} onSave={saveLimit} />}
 
       {screen === 'settings' && <section><div className="page-title"><p className="eyebrow">Control your data</p><h1>Settings</h1></div><div className="settings-grid"><section className="card settings-card"><p className="eyebrow">Cloud backup</p><h2>{user ? `Backed up as ${user.displayName}` : 'Keep a private backup'}</h2><p>{user ? 'Your Google account is only used to identify your private backup. We never read email or contacts.' : 'Your expenses remain on this device until you choose Google sign-in and Back up.'}</p>{user ? <div className="account-row">{user.picture ? <img src={user.picture} alt="" referrerPolicy="no-referrer" /> : <span className="avatar">{user.displayName.slice(0, 1)}</span>}<div><b>{user.displayName}</b><span>{user.email}</span></div><button className="text-button" onClick={async () => { await signOut(); setUser(null); setToast('Signed out. Your local data remains on this device.'); }}>Sign out</button></div> : <GoogleButton onSuccess={handleGoogle} onError={setToast} />}{user && <button className="primary-button full-button" onClick={backupAndSync} disabled={syncing}>{syncing ? 'Syncing…' : pendingCount ? `Back up ${pendingCount} change${pendingCount === 1 ? '' : 's'}` : 'Sync now'}</button>}</section>
-        <section className="card settings-card"><p className="eyebrow">Preferences</p><h2>Make it yours</h2><label className="settings-label">Week starts on<select value={settings.weekStart} onChange={(event) => saveSettings({ ...settings, weekStart: Number(event.target.value) as 0 | 1 })}><option value={1}>Monday</option><option value={0}>Sunday</option></select></label><label className="settings-label">Language<select value={settings.language} onChange={(event) => saveSettings({ ...settings, language: event.target.value as 'en' | 'hi' })}><option value="en">English</option><option value="hi">Hindi</option></select></label><label className="reminder-row"><input type="checkbox" checked={settings.reminderEnabled} onChange={(event) => saveSettings({ ...settings, reminderEnabled: event.target.checked })} /><span><b>Daily reminder</b><small>Notify me at {settings.reminderTime}</small></span><input type="time" value={settings.reminderTime} onChange={(event) => saveSettings({ ...settings, reminderTime: event.target.value })} /></label></section>
+        <section className="card settings-card"><p className="eyebrow">Preferences</p><h2>Make it yours</h2><label className="settings-label">Week starts on<select value={settings.weekStart} onChange={(event) => saveSettings({ ...settings, weekStart: Number(event.target.value) as 0 | 1 })}><option value={1}>Monday</option><option value={0}>Sunday</option></select></label><label className="settings-label">Language<select value={settings.language} onChange={(event) => saveSettings({ ...settings, language: event.target.value as 'en' | 'hi' })}><option value="en">English</option><option value="hi">Hindi</option></select></label><label className="reminder-row"><input type="checkbox" checked={settings.reminderEnabled} onChange={(event) => toggleReminder(event.target.checked)} /><span><b>Daily reminder</b><small>At {settings.reminderTime}; keep Spendwise open to receive it</small></span><input type="time" value={settings.reminderTime} onChange={(event) => saveSettings({ ...settings, reminderTime: event.target.value })} /></label></section>
         <section className="card settings-card quick-manager"><p className="eyebrow">Your shortcuts</p><h2>Quick add shelf</h2><p>Create only the shortcuts that make your own day faster.</p><form className="quick-form" onSubmit={saveChip}><input placeholder="Item, e.g. Tea" value={chipDraft.itemName} onChange={(event) => setChipDraft((current) => ({ ...current, itemName: event.target.value }))} /><input inputMode="decimal" placeholder="Amount" value={chipDraft.amount} onChange={(event) => setChipDraft((current) => ({ ...current, amount: event.target.value }))} /><select value={chipDraft.categoryId} onChange={(event) => setChipDraft((current) => ({ ...current, categoryId: event.target.value, tag: chooseDefaultTag(event.target.value) }))}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select><select value={chipDraft.tag} onChange={(event) => setChipDraft((current) => ({ ...current, tag: event.target.value as NeedWant }))}><option value="need">Need</option><option value="want">Want</option></select><button className="secondary-button" type="submit">Add quick add</button></form><div className="managed-chip-list">{chips.filter((chip) => !chip.deleted).length ? chips.filter((chip) => !chip.deleted).map((chip) => <div key={chip.id}><span>{categoryById(chip.categoryId).icon}</span><b>{chip.itemName}</b><small>{money(chip.defaultAmountPaise)}</small><button aria-label={`Remove ${chip.itemName}`} onClick={() => removeChip(chip)}>×</button></div>) : <p className="hint">No quick adds yet.</p>}</div></section></div></section>}
     </main>
 

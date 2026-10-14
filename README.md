@@ -1,4 +1,4 @@
-﻿# Spendwise
+# Spendwise
 
 Spendwise is a private, offline-first expense tracker. Amounts are stored as integer paise to avoid floating-point currency errors.
 
@@ -37,7 +37,7 @@ Local writes are primary. Records carry `baseVersion`, `version`, `updatedAt`, a
 - `Expense`: item name, integer `amountPaise`, category, need/want tag, local date, optional note, sync fields, tombstone.
 - `QuickAdd`: default amount/category/tag and pin/use metadata.
 - `SpendingLimit`: week/month/year period, amount in paise, active state.
-- `Settings`: week start, language, reminder preferences. Reminder delivery is not implemented.
+- `Settings`: week start, language, reminder preferences. A daily reminder can appear at the selected time while Spendwise is open, if notifications are allowed.
 
 `src/main.tsx` mounts React and registers the service worker in production. `src/App.tsx` renders screens and coordinates state. `src/domain.ts` contains category matching, dates, totals, and limit rules. `src/storage.ts` wraps IndexedDB. `src/api.ts` handles token requests, refresh, Google sign-in exchange, and sync. API base defaults to `/v1`; Vite proxies it to `localhost:4000` during development.
 
@@ -116,6 +116,7 @@ PDFs in `docs/` are design inputs. Capabilities absent from source, especially A
 - Google sign-in needs real client IDs, allowed origins, and the missing token-verification endpoint.
 - Reminder fields are preferences only; notifications are not scheduled.
 - A language preference exists, while visible UI copy is English.
+- Daily reminders use an in-page timer. Browsers may suspend timers, and a reminder cannot fire after the app is closed; reliable closed-app delivery requires server push or a native Android scheduled alarm.
 - Decide whether Android support means browser-installed PWA or a Play Store/native package.
 
 ## Change history

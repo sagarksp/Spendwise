@@ -46,3 +46,12 @@ self.addEventListener('fetch', (event) => {
     }));
   }
 });
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || '/', self.location.origin).href;
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+    const appWindow = clients.find((client) => client.url.startsWith(self.location.origin) && 'focus' in client);
+    return appWindow ? appWindow.focus() : self.clients.openWindow(target);
+  }));
+});
