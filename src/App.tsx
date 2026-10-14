@@ -526,24 +526,28 @@ function Report({ expenses, limits, settings, categories: available = categories
   const cycleAnchor = new Date(year, month - 1, Math.min(settings.monthStartDay, new Date(year, month, 0).getDate()), 12);
   const anchor = period === 'week' ? new Date() : cycleAnchor;
   const range = period === 'week' ? dateRange('week', anchor, settings.weekStart) : monthlyCycleRange(anchor, settings.monthStartDay, settings.monthEndDay);
-  const records = expensesInRange(expenses, range.start, range.end);
+  const rangeRecords = expensesInRange(expenses, range.start, range.end);
+  const records = period === 'month' ? monthlyBudgetExpenses(rangeRecords, fixedExpenses) : rangeRecords;
   const total = sumExpenses(records);
   const previousAnchor = new Date(`${range.start}T12:00:00`);
   previousAnchor.setDate(previousAnchor.getDate() - 1);
   const previousRange = period === 'week' ? dateRange('week', previousAnchor, settings.weekStart) : monthlyCycleRange(previousAnchor, settings.monthStartDay, settings.monthEndDay);
-  const previous = sumExpenses(expensesInRange(expenses, previousRange.start, previousRange.end));
+  const previousRecords = expensesInRange(expenses, previousRange.start, previousRange.end);
+  const previous = sumExpenses(period === 'month' ? monthlyBudgetExpenses(previousRecords, fixedExpenses) : previousRecords);
   const difference = total - previous;
-  const categoryTotals = available.map((category) => ({ ...category, total: sumExpenses(records.filter((expense) => !expense.fixedExpenseId && expense.categoryId === category.id)) })).filter((category) => category.total > 0).sort((a, b) => b.total - a.total);
   const fixedTotal = sumExpenses(records.filter((expense) => Boolean(expense.fixedExpenseId)));
+  const categoryTotals = [
+    ...available.map((category) => ({ ...category, total: sumExpenses(records.filter((expense) => !expense.fixedExpenseId && expense.categoryId === category.id)) })),
+    ...(fixedTotal > 0 ? [{ id: 'fixed-expenses', name: 'Fixed expenses', icon: 'Fx', defaultTag: 'need' as NeedWant, keywords: [], total: fixedTotal }] : [])
+  ].filter((category) => category.total > 0).sort((a, b) => b.total - a.total);
   const maximum = Math.max(...categoryTotals.map((category) => category.total), 1);
   const need = sumExpenses(records.filter((expense) => expense.tag === 'need'));
   const want = sumExpenses(records.filter((expense) => expense.tag === 'want'));
   const days = (period === 'week' ? datesForWeek(anchor, settings.weekStart) : datesInRange(range.start, range.end)).map((date) => ({ date, total: sumExpenses(records.filter((expense) => expense.spentOn === date)) }));
   const dayMaximum = Math.max(...days.map((day) => day.total), 1);
   const limit = activeLimit(limits, period);
-  const budgetRecords = monthlyBudgetExpenses(records, fixedExpenses);
-  const budgetSpent = period === 'month' ? sumExpenses(budgetRecords) : total;
-  const includedFixedTotal = period === 'month' ? sumExpenses(records.filter((expense) => expense.fixedExpenseId && fixedExpenses.some((fixed) => fixed.id === expense.fixedExpenseId && fixed.includeInMonthlyBudget))) : 0;
+  const budgetSpent = total;
+  const includedFixedTotal = period === 'month' ? fixedTotal : 0;
   const status = limitStatus(budgetSpent, limit);
   const categoryLimits = limits.filter((item) => Boolean(item.categoryId));
   const downloadMonthlyPdf = () => {
