@@ -1,0 +1,15 @@
+{
+  "id": "/",
+  "name": "Spendwise — Private Expense Tracker",
+  "short_name": "Spendwise",
+  "description": "A private, offline-first expense tracker.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f7f8f4",
+  "theme_color": "#123c35",
+  "icons": [
+    { "src": "/icons/spendwise.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

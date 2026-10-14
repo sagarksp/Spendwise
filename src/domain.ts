@@ -12,7 +12,7 @@ export const categories: Category[] = [
   { id: 'other', name: 'Other', icon: '✨', defaultTag: 'need', keywords: [] }
 ];
 
-export const today = () => new Date().toISOString().slice(0, 10);
+export const today = () => toDateInput(new Date());
 export const now = () => new Date().toISOString();
 export const makeId = () => crypto.randomUUID();
 
