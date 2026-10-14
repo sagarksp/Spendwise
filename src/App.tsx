@@ -4,7 +4,6 @@ import {
   activeLimit,
   categories,
   categoryById,
-  categoryForItem,
   chooseDefaultTag,
   dateRange,
   datesInRange,
@@ -41,9 +40,10 @@ type ExpenseDraft = {
   spentOn: string;
   note: string;
   saveAsQuick: boolean;
+  sourceQuickId?: string;
 };
 
-const blankDraft = (): ExpenseDraft => ({ amount: '', itemName: '', categoryId: 'other', tag: 'need', spentOn: today(), note: '', saveAsQuick: false });
+const blankDraft = (): ExpenseDraft => ({ amount: '', itemName: '', categoryId: '', tag: 'need', spentOn: today(), note: '', saveAsQuick: false });
 
 function GoogleButton({ onSuccess, onError }: { onSuccess: (credential: string) => void; onError: (message: string) => void }) {
   const holder = useRef<HTMLDivElement>(null);
@@ -213,8 +213,7 @@ function App() {
   const pendingCount = [...expenses, ...chips, ...limits].filter((item) => item.syncState === 'pending').length;
 
   const updateDraftFromItem = (itemName: string) => {
-    const suggested = categoryForItem(itemName, userCategories);
-    setDraft((current) => ({ ...current, itemName, categoryId: suggested.id, tag: suggested.defaultTag }));
+    setDraft((current) => ({ ...current, itemName }));
   };
 
   const saveQuickFromExpense = async (expense: Expense) => {
@@ -240,6 +239,10 @@ function App() {
       setToast('Add an item name and a valid amount.');
       return;
     }
+    if (!draft.categoryId) {
+      setToast('Choose a category before saving this expense.');
+      return;
+    }
     const existing = editingExpense;
     const record: Expense = nextSyncRecord({
       id: existing?.id ?? makeId(),
@@ -253,6 +256,8 @@ function App() {
       deleted: false
     }, existing?.version ?? 0);
     await localStore.saveExpense(record);
+    const sourceQuick = draft.sourceQuickId ? chips.find((chip) => chip.id === draft.sourceQuickId && !chip.deleted) : undefined;
+    if (sourceQuick) await localStore.saveQuickAdd(nextSyncRecord({ ...sourceQuick, useCount: sourceQuick.useCount + 1, lastUsedAt: now() }, sourceQuick.version));
     if (draft.saveAsQuick) await saveQuickFromExpense(record);
     await refreshLocal();
     setEditingExpense(null);
@@ -273,14 +278,11 @@ function App() {
     setToast('Expense removed. It will be removed from your cloud backup on next sync.');
   };
 
-  const useChip = async (chip: QuickAdd) => {
-    const record: Expense = nextSyncRecord({
-      id: makeId(), itemName: chip.itemName, amountPaise: chip.defaultAmountPaise, categoryId: chip.categoryId, tag: chip.tag, spentOn: today(), deleted: false
-    });
-    await localStore.saveExpense(record);
-    await localStore.saveQuickAdd(nextSyncRecord({ ...chip, useCount: chip.useCount + 1, lastUsedAt: now(), deleted: false }, chip.version));
-    await refreshLocal();
-    setToast(`${chip.itemName} added for ${money(chip.defaultAmountPaise)}.`);
+  const useChip = (chip: QuickAdd) => {
+    setEditingExpense(null);
+    setDraft({ amount: String(chip.defaultAmountPaise / 100), itemName: chip.itemName, categoryId: '', tag: chip.tag, spentOn: today(), note: '', saveAsQuick: false, sourceQuickId: chip.id });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setToast(`Choose a category for ${chip.itemName}, then add it.`);
   };
 
   const saveChip = async (event: FormEvent) => {
@@ -463,7 +465,7 @@ function App() {
             <label className="amount-field"><span>Amount</span><div><b>₹</b><input inputMode="decimal" placeholder="0" value={draft.amount} onChange={(event) => setDraft((current) => ({ ...current, amount: event.target.value }))} autoFocus /></div></label>
             <label className="wide-field"><span>For what?</span><input placeholder="Auto, groceries, tea·" value={draft.itemName} onChange={(event) => updateDraftFromItem(event.target.value)} /></label>
             <label><span>Date</span><input type="date" value={draft.spentOn} onChange={(event) => setDraft((current) => ({ ...current, spentOn: event.target.value }))} /></label>
-            <label><span>Category</span><select value={draft.categoryId} onChange={(event) => setDraft((current) => ({ ...current, categoryId: event.target.value, tag: chooseDefaultTag(event.target.value) }))}>{userCategories.map((category) => <option value={category.id} key={category.id}>{category.icon} {category.name}</option>)}</select></label>
+            <label><span>Category</span><select required value={draft.categoryId} onChange={(event) => setDraft((current) => ({ ...current, categoryId: event.target.value, tag: chooseDefaultTag(event.target.value) }))}><option value="" disabled>Select a category</option>{userCategories.map((category) => <option value={category.id} key={category.id}>{category.icon} {category.name}</option>)}</select></label>
             <fieldset className="tag-toggle"><legend>Type</legend><button type="button" className={draft.tag === 'need' ? 'selected need' : ''} onClick={() => setDraft((current) => ({ ...current, tag: 'need' }))}>Need</button><button type="button" className={draft.tag === 'want' ? 'selected want' : ''} onClick={() => setDraft((current) => ({ ...current, tag: 'want' }))}>Want</button></fieldset>
             <label className="wide-field note-field"><span>Note <em>Optional</em></span><input placeholder="Anything useful to remember" value={draft.note} onChange={(event) => setDraft((current) => ({ ...current, note: event.target.value }))} /></label>
             <label className="quick-checkbox"><input type="checkbox" checked={draft.saveAsQuick} onChange={(event) => setDraft((current) => ({ ...current, saveAsQuick: event.target.checked }))} /> Save as a quick add</label>
